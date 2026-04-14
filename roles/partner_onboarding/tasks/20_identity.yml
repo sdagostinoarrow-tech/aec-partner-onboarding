@@ -36,7 +36,7 @@
   loop: "{{ partner_users }}"
   loop_control:
     label: "{{ item.username }}"
-  no_log: true
+  no_log: false
 
 - name: "[id] Fetch current htpasswd secret"
   kubernetes.core.k8s_info:
