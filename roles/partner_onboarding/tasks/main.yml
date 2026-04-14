@@ -28,7 +28,7 @@
 
 - name: Normalize partner_users (handle AAP escaped newlines)
   set_fact:
-    partner_users: "{{ partner_users | regex_replace('\\\\n', '\n') | from_yaml if partner_users is string else partner_users }}"
+    partner_users: "{{ (partner_users | replace('\\n', '\n') | from_yaml) if partner_users is string else partner_users }}"
 
 - name: Diagnostic — what is partner_users AFTER parse
   debug:
