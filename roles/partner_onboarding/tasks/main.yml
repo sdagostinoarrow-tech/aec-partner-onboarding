@@ -15,39 +15,10 @@
 #     RHOAI webhook bug war story in 61_rhoai_workbenches.yml.
 # ============================================================================
 
+---
 - name: Load quota profile
   include_vars: "quota_{{ quota_profile }}.yml"
 
-- name: Diagnostic — what is partner_users really BEFORE parse
-  debug:
-    var: partner_users
-
-- name: Diagnostic — character list of first 50 chars BEFORE parse
-  debug:
-    msg: "{{ partner_users[:50] | list }}"
-
-- name: Normalize partner_users (unwrap unsafe, replace escapes, parse)
-  set_fact:
-    partner_users: "{{ raw_yaml | from_yaml }}"
-  vars:
-    raw_yaml: "{{ partner_users | string | replace('\\n', '\n') }}"
-  when: partner_users is string
-
-- name: Diagnostic — what is partner_users AFTER parse
-  debug:
-    var: partner_users
-
-- name: Diagnostic — type AFTER parse
-  debug:
-    msg: "Type: {{ partner_users | type_debug }}"
-
-- name: Confirm partner_users is now a list
-  assert:
-    that:
-      - partner_users is sequence
-      - partner_users is not string
-    fail_msg: "partner_users could not be parsed. Got type: {{ partner_users | type_debug }}"
-      
 - name: Validate required inputs
   assert:
     that:
