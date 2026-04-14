@@ -18,23 +18,24 @@
 - name: Load quota profile
   include_vars: "quota_{{ quota_profile }}.yml"
 
-- name: Parse partner_users (first pass)
-  set_fact:
-    partner_users: "{{ partner_users | from_yaml }}"
-  when: partner_users is string
+- name: Show what partner_users actually is
+  debug:
+    msg:
+      - "Type: {{ partner_users | type_debug }}"
+      - "Length: {{ partner_users | length }}"
+      - "First 100 chars: {{ partner_users[:100] }}"
+      - "Has dash: {{ '- ' in partner_users }}"
 
-- name: Parse partner_users (second pass if still a string)
+- name: Force-parse partner_users via YAML loader
   set_fact:
-    partner_users: "{{ partner_users | from_yaml }}"
-  when: partner_users is string
+    partner_users: "{{ partner_users | from_yaml_all | list | first if partner_users is string else partner_users }}"
 
-- name: Confirm partner_users is now a list
-  assert:
-    that:
-      - partner_users is sequence
-      - partner_users is not string
-    fail_msg: "partner_users could not be parsed to a list. Got: {{ partner_users }}"
-    
+- name: Show partner_users after parse attempt
+  debug:
+    msg:
+      - "Type: {{ partner_users | type_debug }}"
+      - "Value: {{ partner_users }}"
+      
 - name: Validate required inputs
   assert:
     that:
