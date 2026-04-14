@@ -26,9 +26,12 @@
   debug:
     msg: "{{ partner_users[:50] | list }}"
 
-- name: Normalize partner_users (force unwrap unsafe + replace + parse)
+- name: Normalize partner_users (unwrap unsafe, replace escapes, parse)
   set_fact:
-    partner_users: "{{ (partner_users | string | replace('\\n', '\n') | from_yaml) if partner_users is string else partner_users }}"
+    partner_users: "{{ raw_yaml | from_yaml }}"
+  vars:
+    raw_yaml: "{{ partner_users | string | replace('\\n', '\n') }}"
+  when: partner_users is string
 
 - name: Diagnostic — what is partner_users AFTER parse
   debug:
