@@ -18,6 +18,15 @@
 - name: Load quota profile
   include_vars: "quota_{{ quota_profile }}.yml"
 
+- name: Parse partner_users if it came in as a string (AAP survey textarea behavior)
+  # AAP survey textarea fields always submit as strings, even when the content
+  # is YAML. If partner_users came in as a string, parse it into a proper list.
+  # When run from the command line with `-e @vars/partner.yml`, it arrives as a
+  # list and this is a no-op.
+  set_fact:
+    partner_users: "{{ partner_users | from_yaml }}"
+  when: partner_users is string
+
 - name: Validate required inputs
   assert:
     that:
