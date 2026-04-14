@@ -1,0 +1,393 @@
+---
+# ============================================================================
+# PHASE 6b — RHOAI WORKBENCHES (per-user CPU + optional shared Gaudi)
+# ============================================================================
+# Creates one CPU-only workbench per partner user, plus an optional shared
+# Gaudi workbench they can start on-demand for HPU work and stop when done.
+#
+# CRITICAL ORDERING RULE:
+#   This task file MUST run BEFORE 62_rhoai_dspa.yml. The RHOAI notebook
+#   controller has a bug (RHOAI 3.2.0) where the webhook panics on
+#   extractElyraRuntimeConfigInfo when reconciling any Notebook CR in a
+#   namespace where a DSPA exists. Creating workbenches first means the
+#   initial reconcile happens cleanly. Once the DSPA is added, NEW notebook
+#   reconciles will hit the panic — but EXISTING ones keep running fine.
+#   Stop/start operations on existing workbenches will fail until you
+#   either upgrade RHOAI past the bug, or do the webhook-disable dance
+#   documented in the README.
+#
+# WORKBENCH NAMING — DNS-1035 enforcement:
+#   The notebook controller uses the Notebook CR name directly for the
+#   StatefulSet, Service, and Pod names. Those must be DNS-1035 labels
+#   (lowercase alphanumeric + hyphens, no dots). Partner usernames may
+#   contain dots (e.g., "sarang.raval") so we transform them to dashes
+#   for the workbench name only. The OpenShift username and AAP username
+#   stay unchanged.
+#
+# IMAGE LOOKUP:
+#   We resolve the gaudi-jupyter-notebook ImageStream to its current SHA
+#   at runtime rather than hardcoding a tag. This way, if the cluster
+#   admin imports a newer version of the Gaudi notebook image, the role
+#   picks it up automatically on the next run.
+#
+# WHY CPU-ONLY BY DEFAULT:
+#   Habana Gaudi cards aren't time-sliced — once a workbench requests
+#   habana.ai/gaudi: 1, that card is pinned to the workbench pod and
+#   unavailable to anyone else for as long as the workbench is running.
+#   With 5 partner users + 8 cards on the cluster, you can hoard the
+#   entire HPU pool with idle Jupyter sessions. Default: zero Gaudi
+#   requests on per-user workbenches. Users get an HPU only when they
+#   start the shared Gaudi workbench, and they stop it when done.
+# ============================================================================
+
+- name: "[wb] Look up the current Gaudi notebook image SHA"
+  command: >
+    oc get imagestream gaudi-jupyter-notebook
+    -n redhat-ods-applications
+    -o jsonpath={.status.tags[0].items[0].dockerImageReference}
+  register: gaudi_image_lookup
+  changed_when: false
+
+- name: "[wb] Set the workbench image fact"
+  set_fact:
+    workbench_image: "{{ gaudi_image_lookup.stdout }}"
+
+- name: "[wb] Compute DNS-safe workbench names (dots become dashes)"
+  # Build a parallel list of users with a 'workbench_name' field added.
+  # Partner usernames stay as-is everywhere except in the Notebook CR.
+  set_fact:
+    workbench_users: >-
+      {{
+        workbench_users | default([]) +
+        [ item | combine({
+            'workbench_name': item.username | replace('.', '-')
+          }) ]
+      }}
+  loop: "{{ partner_users }}"
+  loop_control:
+    label: "{{ item.username }}"
+
+# ----------------------------------------------------------------------------
+# Per-user PVCs
+# ----------------------------------------------------------------------------
+# Naming convention: <workbench-name>-storage. This matches the convention
+# the RHOAI dashboard uses when it creates PVCs through the UI, so a
+# partner who later creates additional workbenches via the dashboard will
+# follow the same pattern.
+
+- name: "[wb] Create per-user workbench PVCs"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{ item.workbench_name }}-storage"
+        namespace: "{{ partner_namespace }}"
+        labels:
+          opendatahub.io/dashboard: "true"
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: "{{ rhoai_workbench_pvc_size }}"
+        storageClassName: "{{ rhoai_storage_class }}"
+        volumeMode: Filesystem
+  loop: "{{ workbench_users }}"
+  loop_control:
+    label: "{{ item.workbench_name }}"
+
+# ----------------------------------------------------------------------------
+# Per-user Notebook CRs (CPU-only)
+# ----------------------------------------------------------------------------
+# The Notebook spec below is a near-exact copy of what the RHOAI dashboard
+# generates when you click "Create Workbench" in the UI. Specifically:
+#   - inject-auth: true → triggers webhook to add the kube-rbac-proxy
+#     sidecar and create the HTTPRoute for external access. Without this,
+#     workbenches start but show 504 in the browser.
+#   - last-image-selection annotation → tells dashboard which image was
+#     used (cosmetic, but the dashboard shows "unknown / Deleted" without it)
+#   - opendatahub.io/user label → matches the username, lets the dashboard
+#     show "Owned by <user>"
+#   - serviceAccountName: <username> → the webhook auto-creates a matching
+#     SA when this is set, with an admin RoleBinding scoped to the namespace
+#   - The full set of SSL cert env vars → makes pip, git, requests, etc.
+#     trust the cluster's trusted CA bundle. Important for pulling packages
+#     from internal mirrors or cloning git repos with self-signed certs.
+
+- name: "[wb] Create per-user CPU-only Notebook CRs"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: kubeflow.org/v1
+      kind: Notebook
+      metadata:
+        name: "{{ item.workbench_name }}"
+        namespace: "{{ partner_namespace }}"
+        annotations:
+          notebooks.opendatahub.io/inject-auth: "true"
+          notebooks.opendatahub.io/inject-elyra-secret: "false"
+          notebooks.opendatahub.io/last-image-selection: "gaudi-jupyter-notebook:1.23.0"
+          opendatahub.io/image-display-name: "Intel Gaudi Jupyter"
+          opendatahub.io/username: "{{ item.username }}"
+          openshift.io/display-name: "{{ item.workbench_name }}-workbench"
+        labels:
+          app: "{{ item.workbench_name }}"
+          opendatahub.io/dashboard: "true"
+          opendatahub.io/odh-managed: "true"
+          opendatahub.io/user: "{{ item.workbench_name }}"
+      spec:
+        template:
+          spec:
+            enableServiceLinks: false
+            serviceAccountName: "{{ item.workbench_name }}"
+            containers:
+              - name: "{{ item.workbench_name }}"
+                image: "{{ workbench_image }}"
+                imagePullPolicy: Always
+                workingDir: /opt/app-root/src
+                env:
+                  - name: NOTEBOOK_ARGS
+                    value: |-
+                      --ServerApp.port=8888
+                      --ServerApp.token=''
+                      --ServerApp.password=''
+                      --ServerApp.base_url=/notebook/{{ partner_namespace }}/{{ item.workbench_name }}
+                      --ServerApp.quit_button=False
+                  - name: JUPYTER_IMAGE
+                    value: "{{ workbench_image }}"
+                  - name: PIPELINES_SSL_SA_CERTS
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: KF_PIPELINES_SSL_SA_CERTS
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: GIT_SSL_CAINFO
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: PIP_CERT
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: REQUESTS_CA_BUNDLE
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: SSL_CERT_FILE
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                ports:
+                  - containerPort: 8888
+                    name: notebook-port
+                    protocol: TCP
+                resources:
+                  requests:
+                    cpu: "2"
+                    memory: 8Gi
+                  limits:
+                    cpu: "4"
+                    memory: 16Gi
+                volumeMounts:
+                  - mountPath: /opt/app-root/src/
+                    name: "{{ item.workbench_name }}-storage"
+                  - mountPath: /dev/shm
+                    name: shm
+                  - mountPath: /etc/pki/tls/custom-certs/ca-bundle.crt
+                    name: trusted-ca
+                    readOnly: true
+                    subPath: ca-bundle.crt
+                  - mountPath: /opt/app-root/pipeline-runtimes/
+                    name: runtime-images
+                livenessProbe:
+                  httpGet:
+                    path: "/notebook/{{ partner_namespace }}/{{ item.workbench_name }}/api"
+                    port: notebook-port
+                    scheme: HTTP
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+                  timeoutSeconds: 1
+                  successThreshold: 1
+                  failureThreshold: 3
+                readinessProbe:
+                  httpGet:
+                    path: "/notebook/{{ partner_namespace }}/{{ item.workbench_name }}/api"
+                    port: notebook-port
+                    scheme: HTTP
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+                  timeoutSeconds: 1
+                  successThreshold: 1
+                  failureThreshold: 3
+            volumes:
+              - name: "{{ item.workbench_name }}-storage"
+                persistentVolumeClaim:
+                  claimName: "{{ item.workbench_name }}-storage"
+              - name: shm
+                emptyDir:
+                  medium: Memory
+              - name: trusted-ca
+                configMap:
+                  name: workbench-trusted-ca-bundle
+                  optional: true
+                  items:
+                    - key: ca-bundle.crt
+                      path: ca-bundle.crt
+              - name: runtime-images
+                configMap:
+                  name: pipeline-runtime-images
+                  optional: true
+  loop: "{{ workbench_users }}"
+  loop_control:
+    label: "{{ item.workbench_name }}"
+
+# ----------------------------------------------------------------------------
+# Shared Gaudi workbench — opt-in via enable_rhoai_shared_gaudi_workbench
+# ----------------------------------------------------------------------------
+# Pre-create the ServiceAccount because the webhook only auto-creates SAs
+# for notebooks with a recognized user pattern. shared-gaudi isn't a real
+# user so we have to create it explicitly.
+
+- name: "[wb] Pre-create shared-gaudi ServiceAccount"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: shared-gaudi
+        namespace: "{{ partner_namespace }}"
+  when: enable_rhoai_shared_gaudi_workbench
+
+- name: "[wb] Create shared-gaudi PVC"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: shared-gaudi-storage
+        namespace: "{{ partner_namespace }}"
+        labels:
+          opendatahub.io/dashboard: "true"
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: "{{ rhoai_workbench_pvc_size }}"
+        storageClassName: "{{ rhoai_storage_class }}"
+        volumeMode: Filesystem
+  when: enable_rhoai_shared_gaudi_workbench
+
+- name: "[wb] Create shared Gaudi Notebook CR"
+  # Same shape as the per-user notebooks but with habana.ai/gaudi: 1
+  # in resources. The description annotation tells partners how to use it.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: kubeflow.org/v1
+      kind: Notebook
+      metadata:
+        name: shared-gaudi
+        namespace: "{{ partner_namespace }}"
+        annotations:
+          notebooks.opendatahub.io/inject-auth: "true"
+          notebooks.opendatahub.io/inject-elyra-secret: "false"
+          notebooks.opendatahub.io/last-image-selection: "gaudi-jupyter-notebook:1.23.0"
+          opendatahub.io/image-display-name: "Intel Gaudi Jupyter"
+          opendatahub.io/username: shared-gaudi
+          openshift.io/display-name: "Shared Gaudi Workbench"
+          openshift.io/description: >-
+            Shared Gaudi workbench — start it when you need an HPU card,
+            stop it when you're done so others can use the card.
+        labels:
+          app: shared-gaudi
+          opendatahub.io/dashboard: "true"
+          opendatahub.io/odh-managed: "true"
+          opendatahub.io/user: shared-gaudi
+      spec:
+        template:
+          spec:
+            enableServiceLinks: false
+            serviceAccountName: shared-gaudi
+            containers:
+              - name: shared-gaudi
+                image: "{{ workbench_image }}"
+                imagePullPolicy: Always
+                workingDir: /opt/app-root/src
+                env:
+                  - name: NOTEBOOK_ARGS
+                    value: |-
+                      --ServerApp.port=8888
+                      --ServerApp.token=''
+                      --ServerApp.password=''
+                      --ServerApp.base_url=/notebook/{{ partner_namespace }}/shared-gaudi
+                      --ServerApp.quit_button=False
+                  - name: JUPYTER_IMAGE
+                    value: "{{ workbench_image }}"
+                  - name: PIPELINES_SSL_SA_CERTS
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: KF_PIPELINES_SSL_SA_CERTS
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: GIT_SSL_CAINFO
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: PIP_CERT
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: REQUESTS_CA_BUNDLE
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                  - name: SSL_CERT_FILE
+                    value: /etc/pki/tls/custom-certs/ca-bundle.crt
+                ports:
+                  - containerPort: 8888
+                    name: notebook-port
+                    protocol: TCP
+                resources:
+                  requests:
+                    cpu: "4"
+                    memory: 16Gi
+                    habana.ai/gaudi: "1"
+                  limits:
+                    cpu: "4"
+                    memory: 16Gi
+                    habana.ai/gaudi: "1"
+                volumeMounts:
+                  - mountPath: /opt/app-root/src/
+                    name: shared-gaudi-storage
+                  - mountPath: /dev/shm
+                    name: shm
+                  - mountPath: /etc/pki/tls/custom-certs/ca-bundle.crt
+                    name: trusted-ca
+                    readOnly: true
+                    subPath: ca-bundle.crt
+                  - mountPath: /opt/app-root/pipeline-runtimes/
+                    name: runtime-images
+                livenessProbe:
+                  httpGet:
+                    path: "/notebook/{{ partner_namespace }}/shared-gaudi/api"
+                    port: notebook-port
+                    scheme: HTTP
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+                  timeoutSeconds: 1
+                  successThreshold: 1
+                  failureThreshold: 3
+                readinessProbe:
+                  httpGet:
+                    path: "/notebook/{{ partner_namespace }}/shared-gaudi/api"
+                    port: notebook-port
+                    scheme: HTTP
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+                  timeoutSeconds: 1
+                  successThreshold: 1
+                  failureThreshold: 3
+            volumes:
+              - name: shared-gaudi-storage
+                persistentVolumeClaim:
+                  claimName: shared-gaudi-storage
+              - name: shm
+                emptyDir:
+                  medium: Memory
+              - name: trusted-ca
+                configMap:
+                  name: workbench-trusted-ca-bundle
+                  optional: true
+                  items:
+                    - key: ca-bundle.crt
+                      path: ca-bundle.crt
+              - name: runtime-images
+                configMap:
+                  name: pipeline-runtime-images
+                  optional: true
+  when: enable_rhoai_shared_gaudi_workbench

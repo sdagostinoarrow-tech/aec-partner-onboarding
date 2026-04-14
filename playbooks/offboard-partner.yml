@@ -1,0 +1,48 @@
+---
+# ============================================================================
+# AEC Partner Offboarding — STUB
+# ============================================================================
+# This playbook is a placeholder for future partner offboarding work. It is
+# NOT IMPLEMENTED yet. The intended scope when written:
+#
+#   1. Delete the partner namespace (cascades all in-namespace resources:
+#      RoleBinding, quota, network policies, ServiceAccount, PVCs,
+#      Notebook CRs, DSPA, secrets)
+#   2. Delete cluster-scoped objects we created:
+#        - ClusterRoleBindings (4 of them)
+#        - OpenShift Group
+#   3. Remove htpasswd entries for the partner users
+#   4. Delete the partner Organization in AAP Controller (which cascades
+#      users, team, credentials, inventory)
+#   5. Delete the partner users in EDA (no org scoping there)
+#   6. Optionally delete the MinIO bucket (with prompt — this destroys data)
+#   7. Generate an offboarding report listing what was removed
+#
+# Things to think about before implementing:
+#   - Do we want a "soft offboard" (revoke access but keep data) vs
+#     "hard offboard" (delete everything)?
+#   - Should this require explicit --check + manual approval before
+#     destructive operations?
+#   - How do we handle partners who shared a bucket vs had their own?
+#
+# When you do implement this, MIRROR the phase numbering from
+# tasks/main.yml so it's obvious which phase undoes which.
+# ============================================================================
+
+- name: Offboard AEC partner (NOT IMPLEMENTED)
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Fail with a clear message
+      fail:
+        msg: |
+          The offboard-partner playbook is a stub and has not been
+          implemented yet. To offboard a partner manually:
+            1. oc delete namespace <partner_namespace>
+            2. oc delete group <partner_namespace>-admins
+            3. oc delete clusterrolebinding -l <partner-label>
+            4. Edit htpasswd-secret in openshift-config to remove users
+            5. Delete the partner Organization in the AAP Controller UI
+            6. Delete partner users in the EDA UI
+            7. (Optional) Delete the partner bucket in external MinIO

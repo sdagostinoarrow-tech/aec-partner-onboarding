@@ -1,0 +1,69 @@
+---
+# ============================================================================
+# partner_onboarding — orchestrator
+# ============================================================================
+# This file is the role's entry point. It validates inputs, loads the
+# selected quota profile, and then includes each phase task file in order.
+# Phases can be skipped via the enable_* toggles in defaults/main.yml.
+#
+# IMPORTANT — phase ordering rules:
+#   - Phase 1 (namespace) MUST run before any other phase. The SA token
+#     it creates is consumed by Phase 4 (AAP Controller credential).
+#   - Phase 2 (identity) MUST run before partners log in. The Group it
+#     creates is needed at login time for RBAC resolution.
+#   - Phase 6b (workbenches) MUST run before Phase 6c (DSPA). See the
+#     RHOAI webhook bug war story in 61_rhoai_workbenches.yml.
+# ============================================================================
+
+- name: Load quota profile
+  include_vars: "quota_{{ quota_profile }}.yml"
+
+- name: Validate required inputs
+  assert:
+    that:
+      - partner_name | length > 0
+      - partner_namespace | length > 0
+      - partner_users | length > 0
+      - partner_expiration_date | length > 0
+      - quota_profile in ['small', 'medium', 'large']
+    fail_msg: >
+      Required variables missing or invalid. partner_name, partner_namespace,
+      partner_users, and partner_expiration_date must all be set.
+      quota_profile must be one of: small, medium, large.
+
+- name: "Phase 1 — Namespace foundation"
+  include_tasks: 10_namespace.yml
+  when: enable_namespace
+
+- name: "Phase 2 — Identity (htpasswd users + group)"
+  include_tasks: 20_identity.yml
+  when: enable_identity
+
+- name: "Phase 3 — Operator Hub access"
+  include_tasks: 30_operator_access.yml
+  when: enable_operator_access
+
+- name: "Phase 4 — AAP Controller"
+  include_tasks: 40_aap_controller.yml
+  when: enable_aap_controller
+
+- name: "Phase 5 — AAP EDA"
+  include_tasks: 50_aap_eda.yml
+  when: enable_aap_eda
+
+# NOTE: workbenches MUST come before DSPA due to RHOAI webhook panic bug.
+# See 61_rhoai_workbenches.yml for the war story.
+- name: "Phase 6a — RHOAI MinIO data connection"
+  include_tasks: 60_rhoai_connection.yml
+  when: enable_rhoai
+
+- name: "Phase 6b — RHOAI workbenches"
+  include_tasks: 61_rhoai_workbenches.yml
+  when: enable_rhoai and enable_rhoai_workbenches
+
+- name: "Phase 6c — RHOAI Data Science Pipelines Application"
+  include_tasks: 62_rhoai_dspa.yml
+  when: enable_rhoai and enable_rhoai_dspa
+
+- name: "Phase 7 — Handoff artifact"
+  include_tasks: 90_handoff.yml

@@ -1,0 +1,111 @@
+---
+# ============================================================================
+# DEFAULTS for partner_onboarding role
+# ============================================================================
+# Variables here are the role's "API." Anything a survey or playbook can
+# override should be defined here with a sensible default. Variables that
+# MUST be supplied at runtime are set to empty strings and validated by
+# tasks/main.yml's assert block.
+#
+# Three categories of variables below:
+#   1. Partner identity (must be set per run, no useful default)
+#   2. Feature toggles (default to "everything on")
+#   3. Cluster-specific values (defaults match the AEC ATL lab)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 1. PARTNER IDENTITY — required, no default
+# ----------------------------------------------------------------------------
+partner_name: ""
+partner_namespace: ""
+partner_display_name: "{{ partner_name }} Lab"
+partner_description: ""
+partner_channel_manager: ""
+partner_requester_email: ""
+partner_expiration_date: ""
+
+# List of user dicts. Required.
+# Example:
+#   partner_users:
+#     - username: jane.doe
+#       email: jane.doe@example.com
+#       first_name: Jane
+#       last_name: Doe
+partner_users: []
+
+# ----------------------------------------------------------------------------
+# 2. FEATURE TOGGLES — which phases to run
+# ----------------------------------------------------------------------------
+# Set any of these to false to skip the corresponding phase. Useful when
+# onboarding a partner who only needs a subset (e.g., RHOAI but not AAP).
+enable_namespace: true
+enable_identity: true
+enable_operator_access: true
+enable_aap_controller: true
+enable_aap_eda: true
+enable_rhoai: true
+enable_rhoai_workbenches: true
+enable_rhoai_dspa: true
+enable_rhoai_shared_gaudi_workbench: true
+
+# ----------------------------------------------------------------------------
+# 3a. QUOTA PROFILE
+# ----------------------------------------------------------------------------
+# One of small / medium / large. Concrete numbers live in vars/quota_<x>.yml
+# and get loaded by tasks/main.yml at the start of the run.
+quota_profile: medium
+
+# Number of Gaudi3 cards to grant via quota. Set to 0 to disable Gaudi
+# quota entirely (the workbench template still works for CPU-only).
+gaudi_quota_count: 2
+
+# ----------------------------------------------------------------------------
+# 3b. RHOAI / STORAGE
+# ----------------------------------------------------------------------------
+rhoai_storage_class: nas-sc-rwo
+rhoai_workbench_pvc_size: 50Gi
+rhoai_create_partner_bucket: true
+
+# Where to find the external MinIO admin credentials secret. The role does
+# not create this — it's part of the cluster baseline. Defaults match where
+# the secret was originally placed in the AEC lab.
+rhoai_minio_admin_secret_ns: ai-team
+rhoai_minio_admin_secret_name: minio-storage
+
+# ----------------------------------------------------------------------------
+# 3c. CLUSTER ENDPOINTS — change these once if you re-deploy or move clusters
+# ----------------------------------------------------------------------------
+cluster_api_url: https://api.ocp.rhat.aessatl.arrow.com:6443
+cluster_console_url: https://console-openshift-console.apps.ocp.rhat.aessatl.arrow.com
+rhoai_dashboard_url: https://rhods-dashboard-redhat-ods-applications.apps.ocp.rhat.aessatl.arrow.com
+aap_controller_url: https://aap-controller-aap.apps.ocp.rhat.aessatl.arrow.com
+aap_eda_url: https://eda-aap.apps.ocp.rhat.aessatl.arrow.com
+
+# Cluster's htpasswd identity provider — these match the AEC ATL lab.
+htpasswd_identity_provider_name: "Lab Access"
+htpasswd_secret_namespace: openshift-config
+htpasswd_secret_name: htpasswd-secret
+
+# ----------------------------------------------------------------------------
+# 3d. AAP CONNECTION
+# ----------------------------------------------------------------------------
+# Lab cluster uses self-signed certs on AAP routes. Flip to true if you
+# ever put a real cert on AAP.
+aap_validate_certs: false
+
+# Admin credentials are taken from environment variables, NOT from this
+# file. The Custom Credential Type in AAP injects these:
+#   CONTROLLER_USERNAME / CONTROLLER_PASSWORD
+#   CONTROLLER_EDA_USERNAME / CONTROLLER_EDA_PASSWORD
+
+# ----------------------------------------------------------------------------
+# 3e. HANDOFF
+# ----------------------------------------------------------------------------
+# Where the credentials file gets written. When run from AAP, this is on
+# the ephemeral execution environment pod and disappears after the job
+# unless captured as an artifact (which Phase 7 does via set_stats).
+handoff_output_dir: "{{ playbook_dir }}/../handoffs"
+
+# Print the credentials block to job stdout in addition to the artifact.
+# Belt and suspenders — set false if you don't want creds in the job log.
+handoff_include_in_job_output: true

@@ -1,0 +1,11 @@
+---
+# Small quota profile — 1-2 users, light demos, no heavy ML training
+quota:
+  requests_cpu: "10"
+  limits_cpu: "20"
+  requests_memory: "40Gi"
+  limits_memory: "80Gi"
+  requests_storage: "500Gi"
+  persistentvolumeclaims: "20"
+  pods: "50"
+  services_loadbalancers: "2"

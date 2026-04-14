@@ -1,0 +1,73 @@
+# ============================================================================
+# .gitignore for aec-partner-onboarding
+# ============================================================================
+# Anything matching these patterns won't be committed. The most important
+# entries are the ones that prevent credential leakage — handoffs/ contains
+# the per-partner credentials files, and *-credentials.txt is a defense-in-
+# depth catch-all in case a file ends up outside that directory.
+
+# ----------------------------------------------------------------------------
+# Credential files — DO NOT COMMIT
+# ----------------------------------------------------------------------------
+handoffs/
+*-credentials.txt
+*.creds
+*.secret
+
+# ----------------------------------------------------------------------------
+# Ansible artifacts
+# ----------------------------------------------------------------------------
+*.retry
+*.log
+.ansible/
+fact_cache/
+
+# Vault password files (if you ever use ansible-vault)
+.vault_pass
+.vault_password
+vault-password.txt
+
+# ----------------------------------------------------------------------------
+# Python virtualenvs (in case someone develops the role inside the repo)
+# ----------------------------------------------------------------------------
+venv/
+.venv/
+env/
+.env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# ----------------------------------------------------------------------------
+# Editor / IDE
+# ----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ----------------------------------------------------------------------------
+# Local overrides — files that should never be shared even if accidentally
+# named with these patterns
+# ----------------------------------------------------------------------------
+*.local.yml
+*.local.yaml
+local.yml
+local.yaml
+inventory/local.yml
+group_vars/local/
+host_vars/local/
+
+# ----------------------------------------------------------------------------
+# Temp files
+# ----------------------------------------------------------------------------
+*.tmp
+*.bak
+*.orig
+.scratch/
+scratch/

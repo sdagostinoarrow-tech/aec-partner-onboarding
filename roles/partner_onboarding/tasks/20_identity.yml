@@ -1,0 +1,126 @@
+---
+# ============================================================================
+# PHASE 2 — IDENTITY (htpasswd users + group)
+# ============================================================================
+# Creates the htpasswd entries for partner users and the OpenShift Group that
+# our Phase 1 RoleBinding refers to. After this phase, partner users can
+# log in to the OpenShift console and have admin rights only in their
+# namespace.
+#
+# IMPORTANT SEQUENCING NOTE — User/Group resolution gotcha:
+#   OpenShift's RBAC resolves group membership at login time, not from the
+#   Group object directly. If a user logs in BEFORE we add them to the Group,
+#   their User object gets created with empty group memberships and they have
+#   to delete-and-relogin (or have us delete their Identity + User and let
+#   them log back in) to pick up the membership. So we MUST create the Group
+#   and add users to it BEFORE handing out credentials.
+#
+# Comment about htpasswd identity provider:
+#   Assumes the cluster's OAuth is already configured with an htpasswd IdP.
+#   The role does NOT create the IdP — that's a one-time cluster setup. The
+#   role only adds entries to the existing htpasswd secret. The default IdP
+#   secret name is configurable via htpasswd_secret_name in defaults.
+# ============================================================================
+
+- name: "[id] Generate random passwords for partner users"
+  # ascii_letters + digits, length 14 — strong enough for a 12-week demo
+  # tenant, easy enough to type/paste once.
+  set_fact:
+    partner_users_with_pw: >-
+      {{
+        partner_users_with_pw | default([]) +
+        [ item | combine({
+            'password': lookup('password', '/dev/null chars=ascii_letters,digits length=14')
+          }) ]
+      }}
+  loop: "{{ partner_users }}"
+  loop_control:
+    label: "{{ item.username }}"
+  no_log: true
+
+- name: "[id] Fetch current htpasswd secret"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ htpasswd_secret_name }}"
+    namespace: "{{ htpasswd_secret_namespace }}"
+  register: htpasswd_secret_obj
+
+- name: "[id] Decode current htpasswd contents"
+  set_fact:
+    current_htpasswd: "{{ htpasswd_secret_obj.resources[0].data.htpasswd | b64decode }}"
+  no_log: true
+
+- name: "[id] Stage current htpasswd file to a temp location"
+  copy:
+    content: "{{ current_htpasswd }}"
+    dest: "/tmp/htpasswd.{{ partner_namespace }}.work"
+    mode: '0600'
+  no_log: true
+
+- name: "[id] Add each partner user to the htpasswd file"
+  # We shell out to `htpasswd` with -bB (batch, bcrypt) because that's the
+  # only hash type the OpenShift OAuth provider validates. Make sure the EE
+  # has httpd-tools installed — the supported AAP RHEL9 EE does by default.
+  command: >
+    htpasswd -bB /tmp/htpasswd.{{ partner_namespace }}.work
+    {{ item.username }} {{ item.password }}
+  loop: "{{ partner_users_with_pw }}"
+  loop_control:
+    label: "{{ item.username }}"
+  changed_when: true
+  no_log: true
+
+- name: "[id] Read the updated htpasswd file"
+  slurp:
+    src: "/tmp/htpasswd.{{ partner_namespace }}.work"
+  register: updated_htpasswd_b64
+  no_log: true
+
+- name: "[id] Push updated htpasswd back into the secret"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ htpasswd_secret_name }}"
+        namespace: "{{ htpasswd_secret_namespace }}"
+      type: Opaque
+      data:
+        htpasswd: "{{ updated_htpasswd_b64.content }}"
+  no_log: true
+
+- name: "[id] Clean up the temp htpasswd file"
+  file:
+    path: "/tmp/htpasswd.{{ partner_namespace }}.work"
+    state: absent
+
+- name: "[id] Wait for authentication operator to settle after secret update"
+  # Updating the htpasswd secret triggers a rollout of oauth-openshift pods.
+  # If we proceed before that's done, the next user-facing step (logging in)
+  # might hit a half-rolled-out oauth pod. Usually takes 30-60 seconds.
+  command: >
+    oc wait --for=condition=Progressing=False
+    co/authentication --timeout=5m
+  changed_when: false
+
+# ----------------------------------------------------------------------------
+# Group + membership
+# ----------------------------------------------------------------------------
+# Why this is a separate step from RoleBinding:
+#   The RoleBinding (Phase 1) refers to a Group by name. The Group itself
+#   doesn't have to exist when the RoleBinding is created — RBAC just won't
+#   match anyone until the Group exists. We create the Group here so that
+#   when partner users log in for the first time (which is what creates the
+#   User object), the OAuth flow can resolve their membership immediately.
+
+- name: "[id] Create the partner admins group"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: user.openshift.io/v1
+      kind: Group
+      metadata:
+        name: "{{ partner_namespace }}-admins"
+      users: "{{ partner_users | map(attribute='username') | list }}"

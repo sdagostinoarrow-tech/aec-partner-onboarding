@@ -1,0 +1,21 @@
+---
+# ============================================================================
+# AEC Partner Onboarding — main entry point
+# ============================================================================
+# Wraps the partner_onboarding role. This is the playbook you point an AAP
+# Job Template at, or run from a laptop with:
+#
+#   ansible-playbook playbooks/onboard-partner.yml \
+#     -e @vars/partner-mobia.yml
+#
+# All variables (partner_name, namespace, users, toggles, etc.) come from
+# extra-vars or an AAP survey. See README.md for the full variable schema
+# and an example AAP survey definition.
+# ============================================================================
+
+- name: Onboard AEC partner
+  hosts: localhost
+  gather_facts: true                # we need ansible_date_time for templates
+  connection: local
+  roles:
+    - role: partner_onboarding

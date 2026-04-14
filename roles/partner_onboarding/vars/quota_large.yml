@@ -1,0 +1,12 @@
+---
+# Large quota profile — 7+ users, enterprise POC, expectation of model
+# training, heavy DSPA pipeline runs, multiple concurrent virtual machines.
+quota:
+  requests_cpu: "80"
+  limits_cpu: "160"
+  requests_memory: "320Gi"
+  limits_memory: "640Gi"
+  requests_storage: "5Ti"
+  persistentvolumeclaims: "100"
+  pods: "200"
+  services_loadbalancers: "8"

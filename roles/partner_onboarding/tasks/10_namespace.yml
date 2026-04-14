@@ -1,0 +1,378 @@
+---
+# ============================================================================
+# PHASE 1 — NAMESPACE FOUNDATION
+# ============================================================================
+# Creates the partner namespace with all the RBAC, quota, and network plumbing
+# they need to operate as an isolated tenant on a shared cluster.
+#
+# What this gives the partner:
+#   - A namespace they admin (via the group RoleBinding in Phase 2)
+#   - A resource quota and limit range so they can't blow up the cluster
+#   - Network policies that block cross-tenant traffic but allow what they need
+#   - A pre-created ServiceAccount + token secret that AAP uses to manage their
+#     namespace via OpenShift API (Phase 4 attaches this to an AAP credential)
+#
+# What this does NOT do:
+#   - Create OS users / htpasswd entries (Phase 2)
+#   - Create the group the RoleBinding refers to (Phase 2 — order matters,
+#     but a forward reference here is fine because RoleBindings to nonexistent
+#     groups are valid; the group just gets resolved at request time)
+# ============================================================================
+
+- name: "[ns] Create the partner namespace"
+  # Why labels:
+  #   - opendatahub.io/dashboard=true → tells RHOAI dashboard this is a Data
+  #     Science Project, makes it appear in the dashboard project picker
+  #   - modelmesh-enabled=false → we don't use ModelMesh; KServe RawDeployment
+  #     mode is what we serve models with
+  #   - pod-security.* labels → enforces "restricted" Pod Security Standards,
+  #     which is the cluster's default but we set explicitly so partner can't
+  #     accidentally relax it
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ partner_namespace }}"
+        labels:
+          aec.arrow.com/partner: "{{ partner_namespace }}"
+          aec.arrow.com/tenant-type: partner-demo
+          aec.arrow.com/channel-manager: "{{ partner_channel_manager | default('unknown') }}"
+          opendatahub.io/dashboard: "true"
+          modelmesh-enabled: "false"
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/audit: restricted
+          pod-security.kubernetes.io/warn: restricted
+        annotations:
+          openshift.io/display-name: "{{ partner_display_name }}"
+          openshift.io/description: "{{ partner_description | default('') }}"
+          aec.arrow.com/requested-by: "{{ partner_requester_email | default('unknown') }}"
+          aec.arrow.com/expires: "{{ partner_expiration_date }}"
+
+# ----------------------------------------------------------------------------
+# RBAC — bind the partner group to the built-in admin ClusterRole
+# ----------------------------------------------------------------------------
+# The 'admin' ClusterRole is OpenShift's built-in role for "full control of a
+# namespace, no cluster-level powers." It lets the partner create deployments,
+# services, routes, configmaps, secrets, PVCs, etc., AND manage RoleBindings
+# within their namespace — but they can't touch nodes, other namespaces, CRDs,
+# or anything cluster-scoped.
+
+- name: "[ns] Grant partner admins full namespace admin via RoleBinding"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: "{{ partner_namespace }}-admins-admin"
+        namespace: "{{ partner_namespace }}"
+      subjects:
+        - kind: Group
+          apiGroup: rbac.authorization.k8s.io
+          name: "{{ partner_namespace }}-admins"
+      roleRef:
+        kind: ClusterRole
+        name: admin
+        apiGroup: rbac.authorization.k8s.io
+
+# ----------------------------------------------------------------------------
+# Quota and Limits
+# ----------------------------------------------------------------------------
+# Quota numbers come from vars/quota_<profile>.yml, loaded by tasks/main.yml
+# before this file runs. Profile is one of small/medium/large.
+
+- name: "[ns] Apply ResourceQuota"
+  # The Gaudi quota lines only get included if gaudi_quota_count > 0.
+  # We do this with a Jinja merge so we don't end up with quota keys that
+  # reference resources the cluster doesn't have (which causes the quota
+  # object to fail validation).
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ResourceQuota
+      metadata:
+        name: "{{ partner_namespace }}-quota"
+        namespace: "{{ partner_namespace }}"
+      spec:
+        hard: >-
+          {{
+            {
+              'requests.cpu': quota.requests_cpu,
+              'limits.cpu': quota.limits_cpu,
+              'requests.memory': quota.requests_memory,
+              'limits.memory': quota.limits_memory,
+              'requests.storage': quota.requests_storage,
+              'persistentvolumeclaims': quota.persistentvolumeclaims,
+              'pods': quota.pods,
+              'services.loadbalancers': quota.services_loadbalancers
+            } | combine(
+              {
+                'requests.habana.ai/gaudi': gaudi_quota_count | string,
+                'limits.habana.ai/gaudi': gaudi_quota_count | string
+              } if gaudi_quota_count | int > 0 else {}
+            )
+          }}
+
+- name: "[ns] Apply LimitRange (sane container defaults)"
+  # Why this exists:
+  #   Without a LimitRange, a partner can create a Pod with no resource
+  #   requests at all, which the scheduler treats as 0 cpu / 0 memory and
+  #   will happily schedule onto a saturated node, evict other workloads,
+  #   etc. The defaults below get applied to any container that doesn't
+  #   specify its own requests/limits.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: LimitRange
+      metadata:
+        name: "{{ partner_namespace }}-limits"
+        namespace: "{{ partner_namespace }}"
+      spec:
+        limits:
+          - type: Container
+            default:
+              cpu: "500m"
+              memory: 1Gi
+            defaultRequest:
+              cpu: "100m"
+              memory: 256Mi
+          - type: PersistentVolumeClaim
+            max:
+              storage: 500Gi
+            min:
+              storage: 1Gi
+
+# ----------------------------------------------------------------------------
+# NetworkPolicies — tenant isolation, but allowing the things they need
+# ----------------------------------------------------------------------------
+# Layered approach:
+#   1. default-deny: drop everything by default
+#   2. allow-intra-namespace: pods in the namespace can talk to each other
+#   3. allow-dns-and-router: egress to DNS and openshift-ingress
+#   4. allow-kube-apiserver: egress to :443/:6443 (REQUIRED for OAuth proxy
+#      sidecars on RHOAI workbenches — they call TokenReview)
+#   5. allow-rhoai-operators: ingress from redhat-ods-applications (the DSPA
+#      operator does object-store health checks against minio-dspa in the
+#      partner namespace and times out without this)
+#   6. allow-openshift-ingress: ingress from the router (so external HTTPS
+#      routes can actually reach pods in the namespace)
+#   7. allow-openshift-monitoring: ingress from Prometheus (so user workload
+#      metrics get scraped)
+#
+# WAR STORY: Without policies 4, 5, and 6, RHOAI workbenches will appear to
+# start successfully but the dashboard "Open" link will return 504 Gateway
+# Timeout. The kube-rbac-proxy sidecar can't reach the API server to validate
+# tokens, so HTTPS auth fails silently. Took an hour to debug the first time.
+
+- name: "[ns] NetworkPolicy — default-deny ingress and egress"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: default-deny
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress, Egress]
+
+- name: "[ns] NetworkPolicy — allow intra-namespace traffic"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-intra-namespace
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress, Egress]
+        ingress:
+          - from:
+              - podSelector: {}
+        egress:
+          - to:
+              - podSelector: {}
+
+- name: "[ns] NetworkPolicy — allow egress to DNS and the router"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-dns-and-router
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Egress]
+        egress:
+          - to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: openshift-dns
+          - to:
+              - namespaceSelector:
+                  matchLabels:
+                    network.openshift.io/policy-group: ingress
+
+- name: "[ns] NetworkPolicy — allow egress to kube API server (TokenReview)"
+  # SEE WAR STORY ABOVE. The OAuth/kube-rbac-proxy sidecars on workbenches
+  # use these ports to call /apis/authentication.k8s.io/v1/tokenreviews.
+  # Without this rule, RHOAI workbenches start but show 504 in the browser.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-kube-apiserver
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Egress]
+        egress:
+          - ports:
+              - protocol: TCP
+                port: 443
+              - protocol: TCP
+                port: 6443
+
+- name: "[ns] NetworkPolicy — allow ingress from RHOAI operator namespace"
+  # The data-science-pipelines-operator running in redhat-ods-applications
+  # health-checks the partner namespace's minio-dspa pod. Without this rule,
+  # the DSPA stays in 'ObjectStoreAvailable: False' forever even though the
+  # MinIO pod is healthy.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-rhoai-operators
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress]
+        ingress:
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: redhat-ods-applications
+
+- name: "[ns] NetworkPolicy — allow ingress from openshift-ingress (router)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-openshift-ingress
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress]
+        ingress:
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    network.openshift.io/policy-group: ingress
+
+- name: "[ns] NetworkPolicy — allow ingress from openshift-monitoring"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-openshift-monitoring
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress]
+        ingress:
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    network.openshift.io/policy-group: monitoring
+
+# ----------------------------------------------------------------------------
+# ServiceAccount + token for AAP credential
+# ----------------------------------------------------------------------------
+# Phase 4 (AAP Controller) creates an "OpenShift API Bearer Token" credential
+# in AAP that uses this token. The token is RBAC-scoped to the partner
+# namespace via the RoleBinding below, so even if a partner playbook tries to
+# touch resources outside their namespace, it gets a 403 from the API server.
+#
+# We use the legacy `kubernetes.io/service-account-token` Secret type because
+# it produces a long-lived token. The newer projected token approach
+# (BoundServiceAccountTokenVolume) gives short-lived tokens that AAP can't
+# refresh, so it'd break after an hour. Legacy is the right call for this
+# use case.
+
+- name: "[ns] ServiceAccount for AAP-managed automation"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "aap-{{ partner_namespace }}"
+        namespace: "{{ partner_namespace }}"
+
+- name: "[ns] RoleBinding granting AAP SA admin on the partner namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: "aap-{{ partner_namespace }}-admin"
+        namespace: "{{ partner_namespace }}"
+      subjects:
+        - kind: ServiceAccount
+          name: "aap-{{ partner_namespace }}"
+          namespace: "{{ partner_namespace }}"
+      roleRef:
+        kind: ClusterRole
+        name: admin
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "[ns] Long-lived token Secret for the AAP ServiceAccount"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "aap-{{ partner_namespace }}-token"
+        namespace: "{{ partner_namespace }}"
+        annotations:
+          kubernetes.io/service-account.name: "aap-{{ partner_namespace }}"
+      type: kubernetes.io/service-account-token
+
+- name: "[ns] Wait for the SA token to be populated by the controller"
+  # The token-controller fills in .data.token asynchronously. Without this
+  # wait, the next phase (which reads the token) gets an empty string.
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "aap-{{ partner_namespace }}-token"
+    namespace: "{{ partner_namespace }}"
+  register: sa_token_secret
+  until: sa_token_secret.resources[0].data.token is defined
+  retries: 30
+  delay: 2
+
+- name: "[ns] Stash decoded token and CA for later phases"
+  set_fact:
+    partner_sa_token: "{{ sa_token_secret.resources[0].data.token | b64decode }}"
+    partner_sa_ca: "{{ sa_token_secret.resources[0].data['ca.crt'] | b64decode }}"
+    # no_log here because we don't want the token in job stdout
+  no_log: true

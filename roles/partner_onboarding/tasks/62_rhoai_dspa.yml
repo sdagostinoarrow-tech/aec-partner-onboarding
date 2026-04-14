@@ -1,0 +1,116 @@
+---
+# ============================================================================
+# PHASE 6c — DATA SCIENCE PIPELINES APPLICATION (DSPA)
+# ============================================================================
+# Creates the DSPA CR which triggers the data-science-pipelines-operator
+# (running cluster-wide in redhat-ods-applications) to spin up the pipeline
+# stack inside the partner namespace: mariadb, embedded MinIO, workflow
+# controller, persistence agent, scheduled workflow, metadata grpc, etc.
+# After this completes, the partner sees a working "Pipelines" tab in
+# their Data Science Project in the RHOAI dashboard.
+#
+# CRITICAL ORDERING:
+#   This MUST come AFTER 61_rhoai_workbenches.yml. See the war story in
+#   that file. Once the DSPA exists in a namespace, the buggy
+#   extractElyraRuntimeConfigInfo code path activates on every Notebook
+#   reconcile, and any update to a Notebook CR (stop, start, edit) will
+#   panic the webhook. Existing workbenches that were created BEFORE the
+#   DSPA are unaffected for as long as they don't need to be modified.
+#
+# RECONCILE TRIGGER REQUIRED:
+#   The data-science-pipelines-operator's first health check often races
+#   the namespace networking and times out, leaving the DSPA stuck in
+#   ObjectStoreAvailable=False. We force a reconcile via an annotation
+#   bump after creation to kick it past this initial failure.
+# ============================================================================
+
+- name: "[dspa] Create the DataSciencePipelinesApplication CR"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: datasciencepipelinesapplications.opendatahub.io/v1
+      kind: DataSciencePipelinesApplication
+      metadata:
+        name: dspa
+        namespace: "{{ partner_namespace }}"
+      spec:
+        dspVersion: v2
+        apiServer:
+          enableSamplePipeline: false
+        persistenceAgent:
+          deploy: true
+        scheduledWorkflow:
+          deploy: true
+        mlmd:
+          deploy: true
+        database:
+          disableHealthCheck: false
+          mariaDB:
+            deploy: true
+            pipelineDBName: mlpipeline
+            pvcSize: 10Gi
+            storageClassName: "{{ rhoai_storage_class }}"
+        objectStorage:
+          disableHealthCheck: false
+          minio:
+            deploy: true
+            image: quay.io/minio/minio:latest
+            bucket: mlpipeline
+            pvcSize: 20Gi
+            storageClassName: "{{ rhoai_storage_class }}"
+
+- name: "[dspa] Wait for embedded MariaDB and MinIO pods to be running"
+  # The operator creates these immediately. We wait for them to be running
+  # before forcing the reconcile, otherwise the reconcile happens against
+  # not-yet-existing pods and we don't actually fix anything.
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ partner_namespace }}"
+    label_selectors:
+      - "{{ item }}"
+  register: dspa_pod_check
+  until:
+    - dspa_pod_check.resources | length > 0
+    - dspa_pod_check.resources[0].status.phase == "Running"
+  retries: 60
+  delay: 5
+  loop:
+    - "app=mariadb-dspa"
+    - "app=minio-dspa"
+  loop_control:
+    label: "{{ item }}"
+
+- name: "[dspa] Force a reconcile to clear the initial ObjectStoreAvailable race"
+  # The operator's first health check often runs before in-namespace network
+  # plumbing finishes settling, and it stays stuck on a stale "context
+  # deadline exceeded" condition. Bumping an annotation triggers a fresh
+  # reconcile cycle that re-checks and almost always succeeds.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: datasciencepipelinesapplications.opendatahub.io/v1
+      kind: DataSciencePipelinesApplication
+      metadata:
+        name: dspa
+        namespace: "{{ partner_namespace }}"
+        annotations:
+          aec.arrow.com/force-reconcile: "{{ ansible_date_time.epoch }}"
+
+- name: "[dspa] Wait for DSPA Ready condition"
+  kubernetes.core.k8s_info:
+    api_version: datasciencepipelinesapplications.opendatahub.io/v1
+    kind: DataSciencePipelinesApplication
+    name: dspa
+    namespace: "{{ partner_namespace }}"
+  register: dspa_status
+  until:
+    - dspa_status.resources | length > 0
+    - dspa_status.resources[0].status.conditions is defined
+    - >
+      dspa_status.resources[0].status.conditions
+      | selectattr('type', 'equalto', 'Ready')
+      | selectattr('status', 'equalto', 'True')
+      | list | length > 0
+  retries: 60
+  delay: 5

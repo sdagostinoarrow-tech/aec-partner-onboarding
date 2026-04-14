@@ -1,0 +1,21 @@
+---
+# Collections required by the partner_onboarding role.
+# Install with: ansible-galaxy collection install -r requirements.yml
+#
+# Notes:
+#   - awx.awx is the upstream community collection. We use it instead of
+#     ansible.controller because awx.awx doesn't require an Automation Hub
+#     offline token to install. Both collections expose the same modules
+#     for the operations we use here.
+#   - ansible.eda is pinned to 2.11.0 because that's what we tested against
+#     AAP 2.6 EDA. The user-create path has known bugs that we work around
+#     in tasks/50_aap_eda.yml — pinning means upgrades won't surprise you.
+#   - kubernetes.core is required for all the k8s/oc operations.
+
+collections:
+  - name: awx.awx
+    version: ">=24.6.1"
+  - name: ansible.eda
+    version: "2.11.0"
+  - name: kubernetes.core
+    version: ">=3.0.0"

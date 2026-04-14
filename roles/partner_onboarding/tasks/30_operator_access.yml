@@ -1,0 +1,155 @@
+---
+# ============================================================================
+# PHASE 3 — OPERATOR HUB ACCESS (namespace-scoped operator installs)
+# ============================================================================
+# Lets the partner browse the OperatorHub UI in the OpenShift console and
+# install operators that support OwnNamespace or SingleNamespace install
+# modes. They CANNOT install AllNamespaces operators (RHOAI, OpenShift
+# Pipelines, MTV, GitOps, etc.) — those require cluster-wide privileges
+# we don't grant. They use the shared cluster instances of those instead.
+#
+# WAR STORY — why so many ClusterRoleBindings:
+#   The OpenShift console's OperatorHub page hard-fails (shows "Restricted
+#   access — you don't have access to this section due to cluster policy")
+#   if the user can't read certain cluster-config resources, even though
+#   those resources are unrelated to operator installation. The page reads
+#   things like infrastructures.config.openshift.io to decide whether to
+#   show cloud-provider-specific operators, and if it gets a 403 anywhere
+#   in that load chain, it bails entirely. So we have to grant a bunch of
+#   read-only ClusterRoles. Most are built-in (packagemanifests-v1-view,
+#   aggregate-olm-view, operatorhub-config-reader); cluster-config-reader
+#   is a custom role we create on first run.
+#
+# WAR STORY — User/Identity refresh after RBAC change:
+#   If a partner user has already logged in BEFORE we run this phase, their
+#   in-memory token doesn't have the new permissions. They have to log out,
+#   log back in. Worst case: delete the User and Identity objects and let
+#   them log in fresh.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# OperatorGroup — namespace-scoped, so installed operators only watch THIS
+# namespace. Without this, OLM defaults to AllNamespaces mode and the
+# partner can't install anything because they don't have cluster-scoped
+# privileges to grant the operator.
+# ----------------------------------------------------------------------------
+
+- name: "[op] OperatorGroup scoping installs to the partner namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: "{{ partner_namespace }}-operators"
+        namespace: "{{ partner_namespace }}"
+      spec:
+        targetNamespaces:
+          - "{{ partner_namespace }}"
+
+# ----------------------------------------------------------------------------
+# Custom ClusterRole for cluster config reads
+# ----------------------------------------------------------------------------
+# Reusable across all partners — only needs to be created once per cluster.
+# kubernetes.core.k8s with state=present is idempotent, so re-running this
+# on every onboarding is fine; it'll be a no-op after the first time.
+
+- name: "[op] Custom ClusterRole — cluster-config-reader"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: cluster-config-reader
+      rules:
+        - apiGroups: ["config.openshift.io"]
+          resources: ["*"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["operator.openshift.io"]
+          resources: ["cloudcredentials"]
+          verbs: ["get", "list", "watch"]
+
+# ----------------------------------------------------------------------------
+# ClusterRoleBindings — bind partner group to all the read-only roles needed
+# to make the OperatorHub UI render and function.
+# ----------------------------------------------------------------------------
+
+- name: "[op] CRB — packagemanifests-v1-view"
+  # The actual content of OperatorHub: lets them list available operators
+  # and read PackageManifests / CatalogSources.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "{{ partner_namespace }}-packagemanifests-view"
+      subjects:
+        - kind: Group
+          apiGroup: rbac.authorization.k8s.io
+          name: "{{ partner_namespace }}-admins"
+      roleRef:
+        kind: ClusterRole
+        name: packagemanifests-v1-view
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "[op] CRB — aggregate-olm-view"
+  # The console's Operators menu uses this aggregate role to decide whether
+  # to render the OperatorHub link in the left nav at all.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "{{ partner_namespace }}-olm-view"
+      subjects:
+        - kind: Group
+          apiGroup: rbac.authorization.k8s.io
+          name: "{{ partner_namespace }}-admins"
+      roleRef:
+        kind: ClusterRole
+        name: aggregate-olm-view
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "[op] CRB — operatorhub-config-reader"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "{{ partner_namespace }}-operatorhub-config-reader"
+      subjects:
+        - kind: Group
+          apiGroup: rbac.authorization.k8s.io
+          name: "{{ partner_namespace }}-admins"
+      roleRef:
+        kind: ClusterRole
+        name: operatorhub-config-reader
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "[op] CRB — cluster-config-reader (our custom one)"
+  # Without this, the OperatorHub page errors with:
+  #   "infrastructures.config.openshift.io 'cluster' is forbidden:
+  #    User '<username>' cannot get resource 'infrastructures' in API group
+  #    'config.openshift.io' at the cluster scope"
+  # The cluster-config-reader role grants get/list/watch on the entire
+  # config.openshift.io API group, which covers Infrastructure, Authentication,
+  # Network, Ingress, Proxy, etc. — all the cluster config the console reads.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "{{ partner_namespace }}-cluster-config-reader"
+      subjects:
+        - kind: Group
+          apiGroup: rbac.authorization.k8s.io
+          name: "{{ partner_namespace }}-admins"
+      roleRef:
+        kind: ClusterRole
+        name: cluster-config-reader
+        apiGroup: rbac.authorization.k8s.io

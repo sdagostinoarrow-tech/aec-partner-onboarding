@@ -1,0 +1,109 @@
+---
+# ============================================================================
+# PHASE 6a — RHOAI MINIO DATA CONNECTION
+# ============================================================================
+# Creates a per-partner bucket on the shared external MinIO instance, then
+# creates a Secret in the partner namespace that the RHOAI dashboard
+# recognizes as a "Data Connection." Workbenches can attach this connection
+# to get S3 credentials injected as environment variables, no manual setup.
+#
+# Two MinIO instances exist on the cluster — don't confuse them:
+#   1. The EXTERNAL one at minio-api-minio.apps... — shared, has buckets
+#      per-partner (mobia, ai-demo, etc.). This is what we use for data
+#      connections that workbenches can read/write.
+#   2. The DSPA-EMBEDDED one created by Phase 6c — internal to each
+#      namespace, used only for pipeline artifacts. Partners don't
+#      interact with it directly.
+#
+# CHOICE — partner bucket vs shared bucket:
+#   rhoai_create_partner_bucket: true (default) → each partner gets their
+#     own bucket on the external MinIO. Cleaner separation, partners can't
+#     see each other's data, easier to clean up at offboarding.
+#   rhoai_create_partner_bucket: false → all partners share the ai-demo
+#     bucket. Simpler but no isolation.
+#
+# WAR STORY — `mc` container image entrypoint:
+#   The minio/mc container image uses `mc` as its entrypoint, so any
+#   `oc run` invocation that tries to wrap it in `sh -c` fails because
+#   `mc` doesn't recognize `sh` as a subcommand. Workaround: use the
+#   MC_HOST_<alias> env var to configure the alias inline, then call mc
+#   directly with --command.
+# ============================================================================
+
+- name: "[mc] Fetch external MinIO admin credentials from a known location"
+  # We pull the admin credentials from an existing Secret on the cluster
+  # rather than passing them as playbook vars. The secret has to exist
+  # already (it's part of the cluster baseline, not something the role
+  # creates). Default location is the ai-team namespace where the original
+  # MinIO was wired up.
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ rhoai_minio_admin_secret_name }}"
+    namespace: "{{ rhoai_minio_admin_secret_ns }}"
+  register: minio_admin_secret
+
+- name: "[mc] Decode MinIO admin credentials"
+  set_fact:
+    minio_access_key: "{{ minio_admin_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
+    minio_secret_key: "{{ minio_admin_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
+    minio_endpoint: "{{ minio_admin_secret.resources[0].data.AWS_S3_ENDPOINT | b64decode }}"
+  no_log: true
+
+# ----------------------------------------------------------------------------
+# Bucket creation — only if rhoai_create_partner_bucket is true
+# ----------------------------------------------------------------------------
+
+- name: "[mc] Create the partner bucket on external MinIO"
+  # Uses an ephemeral pod running the minio/mc image. The MC_HOST_ env var
+  # is mc's way to configure an alias without needing `mc alias set`, which
+  # lets us call `mc mb` directly without a wrapper shell.
+  #
+  # The pod name includes the namespace + a date suffix so concurrent runs
+  # against different partners don't collide on the pod name.
+  command: >
+    oc run mc-{{ partner_namespace }}-{{ ansible_date_time.epoch }}
+    --rm -i --restart=Never
+    --image=quay.io/minio/mc:latest
+    --env=MC_HOST_lab=https://{{ minio_access_key }}:{{ minio_secret_key }}@{{ minio_endpoint | regex_replace('^https?://', '') }}
+    --command -- mc mb --ignore-existing lab/{{ partner_namespace }}
+  register: mc_mb_result
+  changed_when: "'created' in mc_mb_result.stdout or 'already' not in mc_mb_result.stderr"
+  failed_when:
+    - mc_mb_result.rc != 0
+    - "'already exists' not in mc_mb_result.stderr"
+  when: rhoai_create_partner_bucket
+  no_log: true
+
+# ----------------------------------------------------------------------------
+# Data Connection Secret in the partner namespace
+# ----------------------------------------------------------------------------
+# The dashboard recognizes secrets with these specific labels and annotations
+# as Data Connections. Workbenches can pick them via the connection picker
+# in the dashboard UI, and the contents get injected as env vars at workbench
+# start time.
+
+- name: "[mc] Create the Data Connection secret in the partner namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: minio-storage
+        namespace: "{{ partner_namespace }}"
+        labels:
+          opendatahub.io/dashboard: "true"
+          opendatahub.io/managed: "true"
+        annotations:
+          opendatahub.io/connection-type: s3
+          openshift.io/display-name: "MinIO ({{ partner_namespace }} bucket)"
+      type: Opaque
+      stringData:
+        AWS_ACCESS_KEY_ID: "{{ minio_access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ minio_secret_key }}"
+        AWS_S3_ENDPOINT: "{{ minio_endpoint }}"
+        AWS_S3_BUCKET: >-
+          {{ partner_namespace if rhoai_create_partner_bucket else 'ai-demo' }}
+        AWS_DEFAULT_REGION: us-east-1
+  no_log: true

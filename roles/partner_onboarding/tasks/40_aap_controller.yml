@@ -1,0 +1,228 @@
+---
+# ============================================================================
+# PHASE 4 — AAP CONTROLLER
+# ============================================================================
+# Creates the partner's organization, users, team, OpenShift credential, and
+# starter inventory in the AAP Controller. After this phase, the partner can
+# log in to the AAP Controller UI and manage projects/job templates/inventories
+# scoped to their org.
+#
+# COLLECTION CHOICE — awx.awx vs ansible.controller:
+#   We use awx.awx (the upstream community collection) instead of
+#   ansible.controller (the Red Hat supported collection from Automation Hub).
+#   Reason: ansible.controller requires an Automation Hub offline token to
+#   install, which is fiddly. awx.awx is on public Galaxy, no auth needed,
+#   and the modules are functionally identical for everything we use here.
+#   The only cosmetic difference: awx.awx prints a warning "You are using
+#   the awx version of this collection but connecting to Red Hat AAP" which
+#   is harmless and can be ignored.
+#
+# WAR STORY — team-as-org-admin doesn't work:
+#   You CANNOT use awx.awx.role to grant a team the Admin role on its parent
+#   org. AWX rejects it with "You cannot assign an Organization participation
+#   role as a child role for a Team." The workaround is to grant the Admin
+#   role to each user directly. The team still exists for resource-level
+#   scoping later (e.g., "only this team can use this credential") but
+#   org-admin is per-user.
+#
+# WAR STORY — auth credentials must be in env vars, not the playbook:
+#   The playbook reads CONTROLLER_USERNAME / CONTROLLER_PASSWORD from env
+#   vars (which is how AAP injects credentials from a Custom Credential
+#   Type). Never hardcode admin passwords in the playbook or vars files.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Preflight — make sure the playbook can actually reach AAP before doing
+# anything else. Catches the case where AAP is down, the URL is wrong, or
+# the admin credentials are bad. Better to fail at the start than halfway
+# through Phase 4.
+# ----------------------------------------------------------------------------
+
+- name: "[aap] Verify Controller admin credentials are present in environment"
+  assert:
+    that:
+      - lookup('env', 'CONTROLLER_USERNAME') | length > 0
+      - lookup('env', 'CONTROLLER_PASSWORD') | length > 0
+    fail_msg: >
+      CONTROLLER_USERNAME and CONTROLLER_PASSWORD must be set in the
+      environment. In AAP, attach a Custom Credential Type that injects
+      these as env vars.
+
+- name: "[aap] Verify partner SA token from Phase 1 is present"
+  assert:
+    that:
+      - partner_sa_token is defined
+      - partner_sa_token | length > 0
+      - partner_sa_ca is defined
+    fail_msg: >
+      partner_sa_token and partner_sa_ca must be set. These come from
+      Phase 1 (10_namespace.yml). If you skipped Phase 1 via
+      enable_namespace=false, you cannot also enable Phase 4.
+
+- name: "[aap] Preflight — confirm we can reach the Controller API"
+  uri:
+    url: "{{ aap_controller_url }}/api/v2/ping/"
+    method: GET
+    validate_certs: "{{ aap_validate_certs }}"
+    status_code: 200
+  register: aap_ping
+  failed_when: aap_ping.status != 200
+  no_log: false  # let this one show output, it's diagnostic
+
+# ----------------------------------------------------------------------------
+# Generate passwords for the partner users
+# ----------------------------------------------------------------------------
+# These passwords are different from the OpenShift htpasswd ones (Phase 2).
+# AAP has its own internal user database and the user accounts are locally
+# scoped. Same username → different credentials in OCP vs AAP.
+
+- name: "[aap] Generate AAP passwords for partner users"
+  set_fact:
+    aap_users_with_pw: >-
+      {{
+        aap_users_with_pw | default([]) +
+        [ item | combine({
+            'aap_password': lookup('password', '/dev/null chars=ascii_letters,digits length=14')
+          }) ]
+      }}
+  loop: "{{ partner_users }}"
+  loop_control:
+    label: "{{ item.username }}"
+  no_log: true
+
+# ----------------------------------------------------------------------------
+# Organization
+# ----------------------------------------------------------------------------
+
+- name: "[aap] Create the partner organization"
+  awx.awx.organization:
+    name: "{{ partner_name }}"
+    description: "{{ partner_description | default('Partner demo organization') }}"
+    state: present
+    controller_host: "{{ aap_controller_url }}"
+    controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    validate_certs: "{{ aap_validate_certs }}"
+
+# ----------------------------------------------------------------------------
+# Users
+# ----------------------------------------------------------------------------
+# update_secrets: false means re-running the playbook against an existing
+# user is a no-op (won't reset their password). Important for idempotence:
+# we want partners to keep their passwords across re-runs.
+
+- name: "[aap] Create partner users"
+  awx.awx.user:
+    username: "{{ item.username }}"
+    password: "{{ item.aap_password }}"
+    email: "{{ item.email }}"
+    first_name: "{{ item.first_name }}"
+    last_name: "{{ item.last_name }}"
+    is_superuser: false
+    update_secrets: false
+    state: present
+    controller_host: "{{ aap_controller_url }}"
+    controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    validate_certs: "{{ aap_validate_certs }}"
+  loop: "{{ aap_users_with_pw }}"
+  loop_control:
+    label: "{{ item.username }}"
+  no_log: true
+
+# ----------------------------------------------------------------------------
+# Team
+# ----------------------------------------------------------------------------
+# The team exists primarily so future resources (credentials, job templates,
+# inventories) can be scoped to "the MOBIA Admins team can use this." We
+# do NOT use the team to grant org-level admin (see war story above) — that's
+# done per-user in the next task.
+
+- name: "[aap] Create the partner admins team"
+  awx.awx.team:
+    name: "{{ partner_name }} Admins"
+    organization: "{{ partner_name }}"
+    state: present
+    controller_host: "{{ aap_controller_url }}"
+    controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    validate_certs: "{{ aap_validate_certs }}"
+
+- name: "[aap] Add partner users to the team"
+  awx.awx.role:
+    user: "{{ item.username }}"
+    team: "{{ partner_name }} Admins"
+    role: member
+    state: present
+    controller_host: "{{ aap_controller_url }}"
+    controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    validate_certs: "{{ aap_validate_certs }}"
+  loop: "{{ aap_users_with_pw }}"
+  loop_control:
+    label: "{{ item.username }}"
+
+# ----------------------------------------------------------------------------
+# Per-user organization admin (the workaround for the team-can't-org-admin bug)
+# ----------------------------------------------------------------------------
+
+- name: "[aap] Grant each partner user Admin role on the partner org"
+  # SEE WAR STORY at top of file. We can't do this via the team, so we do
+  # it per user. End result is the same: each user has full control of the
+  # partner org and nothing else.
+  awx.awx.role:
+    user: "{{ item.username }}"
+    organization: "{{ partner_name }}"
+    role: admin
+    state: present
+    controller_host: "{{ aap_controller_url }}"
+    controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    validate_certs: "{{ aap_validate_certs }}"
+  loop: "{{ aap_users_with_pw }}"
+  loop_control:
+    label: "{{ item.username }}"
+
+# ----------------------------------------------------------------------------
+# OpenShift credential — uses the SA token from Phase 1
+# ----------------------------------------------------------------------------
+# This credential is scoped to the partner org (so only members of that org
+# can see it in the UI), and uses a ServiceAccount token that's RBAC-scoped
+# to the partner namespace (so even if a partner playbook tries to do something
+# outside their namespace, the API server says no).
+#
+# Two layers of isolation: org visibility AND token authorization. Either
+# would be sufficient on its own; both together is defense in depth.
+
+- name: "[aap] Create OpenShift credential scoped to the partner namespace"
+  awx.awx.credential:
+    name: "{{ partner_name }} OpenShift ({{ partner_namespace }} namespace)"
+    organization: "{{ partner_name }}"
+    credential_type: "OpenShift or Kubernetes API Bearer Token"
+    inputs:
+      host: "{{ cluster_api_url }}"
+      bearer_token: "{{ partner_sa_token }}"
+      ssl_ca_cert: "{{ partner_sa_ca }}"
+      verify_ssl: true
+    state: present
+    controller_host: "{{ aap_controller_url }}"
+    controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    validate_certs: "{{ aap_validate_certs }}"
+  no_log: true
+
+# ----------------------------------------------------------------------------
+# Starter inventory — empty placeholder
+# ----------------------------------------------------------------------------
+# Just gives the partner something to see in the Inventories section so the
+# UI doesn't feel empty. They'll create their own real inventories later.
+
+- name: "[aap] Create starter inventory for the partner org"
+  awx.awx.inventory:
+    name: "{{ partner_name }} Lab"
+    organization: "{{ partner_name }}"
+    state: present
+    controller_host: "{{ aap_controller_url }}"
+    controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    validate_certs: "{{ aap_validate_certs }}"

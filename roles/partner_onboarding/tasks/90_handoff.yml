@@ -1,0 +1,66 @@
+---
+# ============================================================================
+# PHASE 7 — HANDOFF ARTIFACT
+# ============================================================================
+# Generates the credentials file the partner gets, surfaces it both as a
+# downloadable AAP job artifact and as a copy-pasteable block in the job
+# stdout. Belt and suspenders — if the artifact flow breaks, the operator
+# can still copy from the log.
+#
+# IDEMPOTENCE WARNING:
+#   The credentials file generated here ONLY reflects the passwords from
+#   THIS run of the playbook. Because Phase 2/4/5 use update_secrets: false,
+#   the actual stored passwords won't be updated on a re-run — the playbook
+#   will generate new ones in memory and write them here, but the system
+#   keeps the old ones. The first run is the source of truth. If you re-run,
+#   ignore the credentials file output and refer to the original.
+#
+#   This is intentional: we want re-runs to be safe (idempotent on
+#   provisioning) without surprise password resets. The downside is that
+#   credentials regeneration requires a separate playbook (rotate-passwords)
+#   that explicitly opts in to update_secrets: true.
+# ============================================================================
+
+- name: "[hand] Ensure the handoff output directory exists"
+  file:
+    path: "{{ handoff_output_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: "[hand] Render the credentials file from template"
+  template:
+    src: credentials.txt.j2
+    dest: "{{ handoff_output_dir }}/{{ partner_namespace }}-credentials.txt"
+    mode: '0600'
+  no_log: true
+
+- name: "[hand] Read credentials file back for stdout banner"
+  slurp:
+    src: "{{ handoff_output_dir }}/{{ partner_namespace }}-credentials.txt"
+  register: creds_file_contents
+  when: handoff_include_in_job_output
+
+- name: "[hand] Print credentials banner to job output"
+  # The banner makes it visually obvious in the AAP job log where the
+  # credentials are. Operators copy from here if they don't want to use
+  # the artifact.
+  debug:
+    msg: |
+      ==========================================================================
+                       PARTNER CREDENTIALS — COPY BEFORE CLOSING
+      ==========================================================================
+      {{ creds_file_contents.content | b64decode }}
+      ==========================================================================
+  when: handoff_include_in_job_output
+
+- name: "[hand] Register credentials file as an AAP job artifact"
+  # set_stats with per_host: false makes this available at the workflow
+  # level, so any downstream job templates in a workflow can read it.
+  # The artifact value is the file path on the EE pod; in the AAP UI it
+  # shows up under the job's "Artifacts" section.
+  set_stats:
+    data:
+      partner_credentials_file: "{{ handoff_output_dir }}/{{ partner_namespace }}-credentials.txt"
+      partner_namespace: "{{ partner_namespace }}"
+      partner_name: "{{ partner_name }}"
+    per_host: false

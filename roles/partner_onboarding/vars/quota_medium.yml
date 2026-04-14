@@ -1,0 +1,12 @@
+---
+# Medium quota profile — 3-6 users, broad demos including RHOAI + AAP +
+# OpenShift Virtualization. This is the MOBIA default.
+quota:
+  requests_cpu: "40"
+  limits_cpu: "80"
+  requests_memory: "160Gi"
+  limits_memory: "320Gi"
+  requests_storage: "2Ti"
+  persistentvolumeclaims: "50"
+  pods: "100"
+  services_loadbalancers: "4"
