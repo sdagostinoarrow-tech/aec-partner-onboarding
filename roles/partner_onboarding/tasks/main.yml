@@ -29,10 +29,13 @@
       - partner_users is not string
     fail_msg: "partner_users could not be parsed. Got type: {{ partner_users | type_debug }}, value: {{ partner_users }}"
 
-- name: Diagnostic — show character codes of first 30 chars
+- name: Diagnostic — what is partner_users really
   debug:
-    msg: "{{ partner_users[:30] | list }}"
-  when: partner_users is string
+    var: partner_users
+
+- name: Diagnostic — character list of first 50 chars
+  debug:
+    msg: "{{ partner_users[:50] | list }}"
       
 - name: Validate required inputs
   assert:
