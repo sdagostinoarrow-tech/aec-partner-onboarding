@@ -28,6 +28,11 @@
       - partner_users is sequence
       - partner_users is not string
     fail_msg: "partner_users could not be parsed. Got type: {{ partner_users | type_debug }}, value: {{ partner_users }}"
+
+- name: Diagnostic — show character codes of first 30 chars
+  debug:
+    msg: "{{ partner_users[:30] | list }}"
+  when: partner_users is string
       
 - name: Validate required inputs
   assert:
