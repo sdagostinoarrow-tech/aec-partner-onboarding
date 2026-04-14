@@ -15,7 +15,6 @@
 #     RHOAI webhook bug war story in 61_rhoai_workbenches.yml.
 # ============================================================================
 
----
 - name: Load quota profile
   include_vars: "quota_{{ quota_profile }}.yml"
 
