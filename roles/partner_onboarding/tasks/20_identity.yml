@@ -69,7 +69,7 @@
   loop_control:
     label: "{{ item.username }}"
   changed_when: true
-  no_log: true
+  no_log: false
 
 - name: "[id] Read the updated htpasswd file"
   slurp:
