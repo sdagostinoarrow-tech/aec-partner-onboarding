@@ -54,6 +54,13 @@
     label: "{{ item.username }}"
   no_log: true
 
+- name: "[eda] Debug — user check results"
+  debug:
+    msg: "User {{ item.item.username }}: count={{ item.json.count | default('undefined') }}"
+  loop: "{{ eda_user_check.results }}"
+  loop_control:
+    label: "{{ item.item.username }}"
+
 - name: "[eda] Create partner users in EDA via REST API"
   uri:
     url: "{{ aap_eda_url }}/api/eda/v1/users/"
@@ -70,7 +77,7 @@
       first_name: "{{ item.0.first_name }}"
       last_name: "{{ item.0.last_name }}"
       is_superuser: false
-    status_code: [201, 400]
+    status_code: [201]
   register: eda_create_result
   loop: "{{ eda_users_with_pw | zip(eda_user_check.results) | list }}"
   loop_control:
