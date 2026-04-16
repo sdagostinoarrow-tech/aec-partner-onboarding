@@ -33,37 +33,36 @@
 
 - name: "Phase 1 — Namespace foundation"
   include_tasks: 10_namespace.yml
-  when: enable_namespace
+  when: enable_namespace | bool
 
 - name: "Phase 2 — Identity (htpasswd users + group)"
   include_tasks: 20_identity.yml
-  when: enable_identity
+  when: enable_identity | bool
 
 - name: "Phase 3 — Operator Hub access"
   include_tasks: 30_operator_access.yml
-  when: enable_operator_access
+  when: enable_operator_access | bool
 
 - name: "Phase 4 — AAP Controller"
   include_tasks: 40_aap_controller.yml
-  when: enable_aap_controller
+  when: enable_aap_controller | bool
 
 - name: "Phase 5 — AAP EDA"
   include_tasks: 50_aap_eda.yml
-  when: enable_aap_eda
+  when: enable_aap_eda | bool
 
 # NOTE: workbenches MUST come before DSPA due to RHOAI webhook panic bug.
 # See 61_rhoai_workbenches.yml for the war story.
 - name: "Phase 6a — RHOAI MinIO data connection"
   include_tasks: 60_rhoai_connection.yml
-  when: enable_rhoai
+  when: enable_rhoai | bool
 
 - name: "Phase 6b — RHOAI workbenches"
   include_tasks: 61_rhoai_workbenches.yml
-  when: enable_rhoai and enable_rhoai_workbenches
+  when: enable_rhoai | bool and enable_rhoai_workbenches | bool
 
 - name: "Phase 6c — RHOAI Data Science Pipelines Application"
   include_tasks: 62_rhoai_dspa.yml
-  when: enable_rhoai and enable_rhoai_dspa
-
+  when: enable_rhoai | bool and enable_rhoai_dspa | bool
 - name: "Phase 7 — Handoff artifact"
   include_tasks: 90_handoff.yml
