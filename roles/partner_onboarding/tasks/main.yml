@@ -47,6 +47,13 @@
   include_tasks: 40_aap_controller.yml
   when: enable_aap_controller | bool
 
+- name: "Debug — EDA toggle value"
+  debug:
+    msg:
+      - "Raw value: {{ enable_aap_eda }}"
+      - "Type: {{ enable_aap_eda | type_debug }}"
+      - "Bool: {{ enable_aap_eda | bool }}"
+      
 - name: "Phase 5 — AAP EDA"
   include_tasks: 50_aap_eda.yml
   when: enable_aap_eda | bool
