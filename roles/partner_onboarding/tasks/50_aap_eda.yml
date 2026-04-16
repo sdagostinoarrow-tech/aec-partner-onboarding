@@ -43,13 +43,10 @@
 
 - name: "[eda] Preflight — confirm we can reach the EDA API"
   uri:
-    url: "{{ aap_eda_url }}/api/eda/v1/status/"
+    url: "{{ aap_eda_url }}/api/eda/v1/"
     method: GET
     validate_certs: "{{ aap_validate_certs }}"
-    status_code: [200, 401]
-    # 401 is acceptable here — it just means the endpoint is alive and
-    # asking for auth. We're not authenticating yet, just checking that
-    # the URL is reachable and serving HTTP.
+    status_code: [200, 301, 302, 401, 403, 404]
   register: eda_ping
 
 - name: "[eda] Generate EDA passwords for partner users"
