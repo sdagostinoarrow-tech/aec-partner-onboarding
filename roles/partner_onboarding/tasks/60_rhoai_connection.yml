@@ -73,7 +73,7 @@
     - mc_mb_result.rc != 0
     - "'already exists' not in mc_mb_result.stderr"
   when: rhoai_create_partner_bucket
-  no_log: true
+  no_log: false
 
 # ----------------------------------------------------------------------------
 # Data Connection Secret in the partner namespace
