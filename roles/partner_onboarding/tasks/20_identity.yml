@@ -87,7 +87,7 @@
   loop_control:
     label: "{{ item.username }}"
   changed_when: true
-  no_log: false
+  no_log: true
 
 - name: "[id] Read the updated htpasswd file"
   slurp:
@@ -115,13 +115,20 @@
     state: absent
 
 - name: "[id] Wait for authentication operator to settle after secret update"
-  # Updating the htpasswd secret triggers a rollout of oauth-openshift pods.
-  # If we proceed before that's done, the next user-facing step (logging in)
-  # might hit a half-rolled-out oauth pod. Usually takes 30-60 seconds.
-  command: >
-    oc wait --for=condition=Progressing=False
-    co/authentication --timeout=5m
-  changed_when: false
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: ClusterOperator
+    name: authentication
+  register: auth_co
+  until:
+    - auth_co.resources | length > 0
+    - auth_co.resources[0].status.conditions is defined
+    - auth_co.resources[0].status.conditions
+      | selectattr('type', 'equalto', 'Progressing')
+      | selectattr('status', 'equalto', 'False')
+      | list | length > 0
+  retries: 60
+  delay: 5
 
 # ----------------------------------------------------------------------------
 # Group + membership
