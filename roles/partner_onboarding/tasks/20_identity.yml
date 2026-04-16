@@ -65,11 +65,8 @@
   changed_when: false
 
 - name: "[id] Install httpd-tools if htpasswd is missing"
-  package:
-    name: httpd-tools
-    state: present
+  raw: dnf install -y httpd-tools
   when: htpasswd_check.rc != 0
-  become: true
 
 - name: "[id] Add each partner user to the htpasswd file"
   # We shell out to `htpasswd` with -bB (batch, bcrypt) because that's the
