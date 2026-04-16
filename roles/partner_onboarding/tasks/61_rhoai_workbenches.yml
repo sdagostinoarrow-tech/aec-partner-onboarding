@@ -41,17 +41,17 @@
 # ============================================================================
 
 - name: "[wb] Look up the current Gaudi notebook image SHA"
-  command: >
-    oc get imagestream gaudi-jupyter-notebook
-    -n redhat-ods-applications
-    -o jsonpath={.status.tags[0].items[0].dockerImageReference}
+  kubernetes.core.k8s_info:
+    api_version: image.openshift.io/v1
+    kind: ImageStream
+    name: gaudi-jupyter-notebook
+    namespace: redhat-ods-applications
   register: gaudi_image_lookup
-  changed_when: false
 
 - name: "[wb] Set the workbench image fact"
   set_fact:
-    workbench_image: "{{ gaudi_image_lookup.stdout }}"
-
+    workbench_image: "{{ gaudi_image_lookup.resources[0].status.tags[0].items[0].dockerImageReference }}"
+    
 - name: "[wb] Compute DNS-safe workbench names (dots become dashes)"
   # Build a parallel list of users with a 'workbench_name' field added.
   # Partner usernames stay as-is everywhere except in the Notebook CR.
