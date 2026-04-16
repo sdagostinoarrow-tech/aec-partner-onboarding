@@ -55,25 +55,61 @@
 # ----------------------------------------------------------------------------
 
 - name: "[mc] Create the partner bucket on external MinIO"
-  # Uses an ephemeral pod running the minio/mc image. The MC_HOST_ env var
-  # is mc's way to configure an alias without needing `mc alias set`, which
-  # lets us call `mc mb` directly without a wrapper shell.
-  #
-  # The pod name includes the namespace + a date suffix so concurrent runs
-  # against different partners don't collide on the pod name.
-  command: >
-    oc run mc-{{ partner_namespace }}-{{ ansible_date_time.epoch }}
-    --rm -i --restart=Never
-    --image=quay.io/minio/mc:latest
-    --env=MC_HOST_lab=https://{{ minio_access_key }}:{{ minio_secret_key }}@{{ minio_endpoint | regex_replace('^https?://', '') }}
-    --command -- mc mb --ignore-existing lab/{{ partner_namespace }}
-  register: mc_mb_result
-  changed_when: "'created' in mc_mb_result.stdout or 'already' not in mc_mb_result.stderr"
-  failed_when:
-    - mc_mb_result.rc != 0
-    - "'already exists' not in mc_mb_result.stderr"
+  kubernetes.core.k8s:
+    state: present
+    wait: true
+    wait_timeout: 120
+    wait_condition:
+      type: Ready
+      status: "True"
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: "mc-{{ partner_namespace }}"
+        namespace: "{{ partner_namespace }}"
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: mc
+            image: quay.io/minio/mc:latest
+            command: ["mc"]
+            args: ["mb", "--ignore-existing", "lab/{{ partner_namespace }}"]
+            env:
+              - name: MC_HOST_lab
+                value: "https://{{ minio_access_key }}:{{ minio_secret_key }}@{{ minio_endpoint | regex_replace('^https?://', '') }}"
   when: rhoai_create_partner_bucket
-  no_log: false
+  no_log: true
+
+- name: "[mc] Wait for mc pod to complete"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    name: "mc-{{ partner_namespace }}"
+    namespace: "{{ partner_namespace }}"
+  register: mc_pod
+  until:
+    - mc_pod.resources | length > 0
+    - mc_pod.resources[0].status.phase in ['Succeeded', 'Failed']
+  retries: 30
+  delay: 5
+  when: rhoai_create_partner_bucket
+
+- name: "[mc] Check mc pod result"
+  fail:
+    msg: "MinIO bucket creation failed. Check pod logs: oc logs mc-{{ partner_namespace }} -n {{ partner_namespace }}"
+  when:
+    - rhoai_create_partner_bucket
+    - mc_pod.resources[0].status.phase == 'Failed'
+
+- name: "[mc] Clean up mc pod"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Pod
+    name: "mc-{{ partner_namespace }}"
+    namespace: "{{ partner_namespace }}"
+  when: rhoai_create_partner_bucket
 
 # ----------------------------------------------------------------------------
 # Data Connection Secret in the partner namespace
