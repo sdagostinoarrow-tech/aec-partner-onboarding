@@ -58,6 +58,19 @@
     mode: '0600'
   no_log: true
 
+- name: "[id] Ensure htpasswd binary is available"
+  command: which htpasswd
+  register: htpasswd_check
+  failed_when: false
+  changed_when: false
+
+- name: "[id] Install httpd-tools if htpasswd is missing"
+  package:
+    name: httpd-tools
+    state: present
+  when: htpasswd_check.rc != 0
+  become: true
+
 - name: "[id] Add each partner user to the htpasswd file"
   # We shell out to `htpasswd` with -bB (batch, bcrypt) because that's the
   # only hash type the OpenShift OAuth provider validates. Make sure the EE
@@ -69,7 +82,7 @@
   loop_control:
     label: "{{ item.username }}"
   changed_when: true
-  no_log: false
+  no_log: true
 
 - name: "[id] Read the updated htpasswd file"
   slurp:
