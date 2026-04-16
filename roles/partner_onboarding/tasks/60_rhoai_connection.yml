@@ -73,8 +73,10 @@
             env:
               - name: MC_HOST_lab
                 value: "https://{{ minio_access_key }}:{{ minio_secret_key }}@{{ minio_endpoint | regex_replace('^https?://', '') }}"
+              - name: HOME
+                value: "/tmp"
   when: rhoai_create_partner_bucket
-  no_log: false
+  no_log: true
 
 - name: "[mc] Wait for mc pod to complete"
   kubernetes.core.k8s_info:
