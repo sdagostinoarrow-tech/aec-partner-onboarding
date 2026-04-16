@@ -69,17 +69,25 @@
   when: htpasswd_check.rc != 0
 
 - name: "[id] Add each partner user to the htpasswd file"
-  # We shell out to `htpasswd` with -bB (batch, bcrypt) because that's the
-  # only hash type the OpenShift OAuth provider validates. Make sure the EE
-  # has httpd-tools installed — the supported AAP RHEL9 EE does by default.
-  command: >
-    htpasswd -bB /tmp/htpasswd.{{ partner_namespace }}.work
-    {{ item.username }} {{ item.password }}
+  shell: |
+    python3 -c "
+    import bcrypt
+    username = '{{ item.username }}'
+    password = '{{ item.password }}'.encode('utf-8')
+    hashed = bcrypt.hashpw(password, bcrypt.gensalt(rounds=12)).decode('utf-8')
+    entry = username + ':' + hashed
+    # Read existing file, remove old entry for this user if present
+    with open('/tmp/htpasswd.{{ partner_namespace }}.work', 'r') as f:
+        lines = [l for l in f.readlines() if not l.startswith(username + ':')]
+    lines.append(entry + '\n')
+    with open('/tmp/htpasswd.{{ partner_namespace }}.work', 'w') as f:
+        f.writelines(lines)
+    "
   loop: "{{ partner_users_with_pw }}"
   loop_control:
     label: "{{ item.username }}"
   changed_when: true
-  no_log: true
+  no_log: false
 
 - name: "[id] Read the updated htpasswd file"
   slurp:
