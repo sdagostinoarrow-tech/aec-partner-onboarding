@@ -2,33 +2,10 @@
 # ============================================================================
 # PHASE 5 — AAP EDA (Event-Driven Ansible)
 # ============================================================================
-# Creates partner users in EDA Controller. That's all this phase does, and
-# that's deliberate — EDA's RBAC story on AAP 2.6 (split deployment) is
-# limited to per-user role assignment. There are no Organizations, Teams,
-# or scoping mechanisms in this version of EDA. Anything a partner creates
-# in EDA (Decision Environments, Rulebook Activations) is visible to all
-# other EDA users.
-#
-# COLLECTION VERSION GOTCHA — ansible.eda 2.11.0 against AAP 2.6:
-#   The collection has bugs in its UUID handling. The user creation path
-#   works IF you pass `roles: [Contributor]`, even though the doc says
-#   roles is ignored on AAP 2.5+. The collection's AAP-version detection
-#   is broken and falls back to AAP 2.4 behavior, which requires roles.
-#   Other modules (team, role assignment, org) are either missing or
-#   broken against UUIDs and we don't use them.
-#
-# WAR STORY — UUID vs integer ID:
-#   On AAP 2.6 EDA, role IDs are UUIDs. The ansible.eda 2.11.0 collection
-#   tries to int() them and panics. The workaround is to specify role
-#   names as strings, which the create path accepts. We use 'Contributor'
-#   because it's the lowest-privilege role that lets users actually create
-#   Decision Environments and Rulebook Activations.
-#
-# WHEN UPGRADING TO AAP 2.6 UNIFIED GATEWAY:
-#   Once your AAP is on the unified gateway, EDA shares orgs/teams/RBAC
-#   with Controller. At that point, this phase can be expanded to create
-#   the partner org and team in EDA the same way Phase 4 does for
-#   Controller. Until then, keep it user-only.
+# Creates partner users in EDA Controller via direct REST API calls.
+# We bypass the ansible.eda collection entirely because it has a known
+# bug where resolve_name_to_id tries to int() a UUID on AAP 2.6.
+# The uri module talks to the same REST API without the buggy abstraction.
 # ============================================================================
 
 - name: "[eda] Verify EDA admin credentials are present in environment"
@@ -38,8 +15,7 @@
       - lookup('env', 'CONTROLLER_EDA_PASSWORD') | length > 0
     fail_msg: >
       CONTROLLER_EDA_USERNAME and CONTROLLER_EDA_PASSWORD must be set in
-      the environment. The same Custom Credential Type that injects
-      Controller creds should also inject these.
+      the environment.
 
 - name: "[eda] Preflight — confirm we can reach the EDA API"
   uri:
@@ -50,9 +26,6 @@
   register: eda_ping
 
 - name: "[eda] Generate EDA passwords for partner users"
-  # Same approach as Phase 4: random per-user passwords, separate from
-  # both OpenShift and AAP Controller passwords. Three sets of credentials
-  # per user is annoying but it's what the split deployment gives us.
   set_fact:
     eda_users_with_pw: >-
       {{
@@ -66,28 +39,42 @@
     label: "{{ item.username }}"
   no_log: true
 
-- name: "[eda] Create partner users in EDA Controller"
-  ansible.eda.user:
-    username: "{{ item.username }}"
-    password: "{{ item.eda_password }}"
-    email: "{{ item.email }}"
-    first_name: "{{ item.first_name }}"
-    last_name: "{{ item.last_name }}"
-    is_superuser: false
-    update_secrets: false
-    # The 'roles' parameter is documented as "ignored on AAP 2.5+" but the
-    # collection's version detection is buggy on AAP 2.6 and the create
-    # path requires it. Contributor is the right level for partner users:
-    # they can create projects, decision environments, rulebook activations,
-    # and event streams, but they cannot manage other users.
-    roles:
-      - Contributor
-    state: present
-    controller_host: "{{ aap_eda_url }}"
-    controller_username: "{{ lookup('env', 'CONTROLLER_EDA_USERNAME') }}"
-    controller_password: "{{ lookup('env', 'CONTROLLER_EDA_PASSWORD') }}"
+- name: "[eda] Check if user already exists in EDA"
+  uri:
+    url: "{{ aap_eda_url }}/api/eda/v1/users/?username={{ item.username }}"
+    method: GET
+    user: "{{ lookup('env', 'CONTROLLER_EDA_USERNAME') }}"
+    password: "{{ lookup('env', 'CONTROLLER_EDA_PASSWORD') }}"
+    force_basic_auth: true
     validate_certs: "{{ aap_validate_certs }}"
+    status_code: [200]
+  register: eda_user_check
   loop: "{{ eda_users_with_pw }}"
   loop_control:
     label: "{{ item.username }}"
-  no_log: false
+  no_log: true
+
+- name: "[eda] Create partner users in EDA via REST API"
+  uri:
+    url: "{{ aap_eda_url }}/api/eda/v1/users/"
+    method: POST
+    user: "{{ lookup('env', 'CONTROLLER_EDA_USERNAME') }}"
+    password: "{{ lookup('env', 'CONTROLLER_EDA_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: "{{ aap_validate_certs }}"
+    body_format: json
+    body:
+      username: "{{ item.0.username }}"
+      password: "{{ item.0.eda_password }}"
+      email: "{{ item.0.email }}"
+      first_name: "{{ item.0.first_name }}"
+      last_name: "{{ item.0.last_name }}"
+      is_superuser: false
+    status_code: [201, 400]
+  register: eda_create_result
+  loop: "{{ eda_users_with_pw | zip(eda_user_check.results) | list }}"
+  loop_control:
+    label: "{{ item.0.username }}"
+  when: item.1.json.count | default(0) == 0
+  no_log: true
+  changed_when: eda_create_result.status == 201
