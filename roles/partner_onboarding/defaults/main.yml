@@ -41,12 +41,12 @@ partner_users: []
 enable_namespace: true
 enable_identity: true
 enable_operator_access: true
-enable_aap_controller: true
-enable_aap_eda: true
-enable_rhoai: true
-enable_rhoai_workbenches: true
-enable_rhoai_dspa: true
-enable_rhoai_shared_gaudi_workbench: true
+enable_aap_controller: false
+enable_aap_eda: false
+enable_rhoai: false
+enable_rhoai_workbenches: false
+enable_rhoai_dspa: false
+enable_rhoai_shared_gaudi_workbench: false
 
 # ----------------------------------------------------------------------------
 # 3a. QUOTA PROFILE
@@ -57,7 +57,7 @@ quota_profile: medium
 
 # Number of Gaudi3 cards to grant via quota. Set to 0 to disable Gaudi
 # quota entirely (the workbench template still works for CPU-only).
-gaudi_quota_count: 2
+gaudi_quota_count: 1
 
 # ----------------------------------------------------------------------------
 # 3b. RHOAI / STORAGE
