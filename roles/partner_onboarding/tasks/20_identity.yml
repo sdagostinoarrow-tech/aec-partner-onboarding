@@ -65,7 +65,7 @@
   changed_when: false
 
 - name: "[id] Install httpd-tools if htpasswd is missing"
-  raw: dnf install -y httpd-tools
+  raw: "microdnf install -y httpd-tools || yum install -y httpd-tools || pip3 install bcrypt"
   when: htpasswd_check.rc != 0
 
 - name: "[id] Add each partner user to the htpasswd file"
