@@ -83,5 +83,5 @@
   loop_control:
     label: "{{ item.0.username }}"
   when: item.1.json.count | default(0) == 0
-  no_log: true
+  no_log: false
   changed_when: eda_create_result.status == 201
