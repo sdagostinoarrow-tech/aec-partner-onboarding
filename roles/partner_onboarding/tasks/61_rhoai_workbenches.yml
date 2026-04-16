@@ -48,6 +48,10 @@
     namespace: redhat-ods-applications
   register: gaudi_image_lookup
 
+- name: "[wb] Debug — ImageStream structure"
+  debug:
+    msg: "{{ gaudi_image_lookup.resources[0].status | to_nice_json }}"
+
 - name: "[wb] Set the workbench image fact"
   set_fact:
     workbench_image: "{{ gaudi_image_lookup.resources[0].status.tags[0].items[0].dockerImageReference }}"
