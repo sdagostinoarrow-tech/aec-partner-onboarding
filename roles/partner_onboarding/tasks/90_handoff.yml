@@ -32,7 +32,7 @@
     src: credentials.txt.j2
     dest: "{{ handoff_output_dir }}/{{ partner_namespace }}-credentials.txt"
     mode: '0600'
-  no_log: true
+  no_log: false
 
 - name: "[hand] Read credentials file back for stdout banner"
   slurp:
