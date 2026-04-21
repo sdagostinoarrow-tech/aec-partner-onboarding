@@ -136,7 +136,7 @@
           - type: Container
             default:
               cpu: "500m"
-              memory: 1Gi
+              memory: 4Gi
             defaultRequest:
               cpu: "100m"
               memory: 256Mi
