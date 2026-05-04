@@ -1,0 +1,73 @@
+---
+# ============================================================================
+# PHASE 6 — LAB ATTRIBUTION DATABASE
+# ============================================================================
+# Registers the partner and their users in the lab attribution system's
+# Postgres database. After this phase, the partner's users can log sessions
+# through the intake page and their activity will be tracked and reported.
+#
+# This phase is idempotent — running it again for an existing partner will
+# not create duplicates (uses ON CONFLICT DO NOTHING / DO UPDATE).
+#
+# REQUIRES:
+#   - partner_name          (e.g., "MOBIA")
+#   - partner_namespace     (e.g., "mobia")
+#   - partner_manager       (e.g., "Steve")
+#   - partner_users         (list of dicts with at minimum 'username' key)
+#   - partner_access_expires (optional, e.g., "2026-07-01")
+# ============================================================================
+
+- name: "Phase 6 — Lab Attribution Database"
+  block:
+    - name: Build user list for SQL
+      set_fact:
+        _attribution_usernames: "{{ partner_users | map(attribute='username') | list }}"
+
+    - name: Build SQL for partner and user registration
+      set_fact:
+        _attribution_sql: |
+          -- Create or update the partner record
+          INSERT INTO partners (name, namespace, partner_manager, access_expires)
+          VALUES (
+            '{{ partner_name }}',
+            '{{ partner_namespace }}',
+            '{{ partner_manager | default("Steve") }}',
+            {{ ("'" + partner_access_expires + "'") if partner_access_expires is defined and partner_access_expires else 'NULL' }}
+          )
+          ON CONFLICT (name) DO UPDATE SET
+            namespace = EXCLUDED.namespace,
+            partner_manager = EXCLUDED.partner_manager,
+            access_expires = EXCLUDED.access_expires,
+            active = true;
+
+          -- Register each user to this partner
+          {% for user in partner_users %}
+          INSERT INTO partner_users (partner_id, username)
+          SELECT id, '{{ user.username }}'
+          FROM partners WHERE name = '{{ partner_name }}'
+          ON CONFLICT (partner_id, username) DO NOTHING;
+          {% endfor %}
+
+    - name: Register partner and users in attribution database
+      kubernetes.core.k8s_exec:
+        namespace: lab-attribution
+        pod: postgres-0
+        command: >
+          psql -U intake -d attribution -c "{{ _attribution_sql | replace('\n', ' ') }}"
+      register: _attribution_result
+
+    - name: Show attribution registration result
+      debug:
+        msg: >
+          Partner '{{ partner_name }}' registered in attribution DB with
+          {{ partner_users | length }} user(s):
+          {{ _attribution_usernames | join(', ') }}
+
+  rescue:
+    - name: Warn on attribution failure (non-fatal)
+      debug:
+        msg: >
+          WARNING: Failed to register partner in attribution database.
+          The partner is onboarded to OCP/AAP/EDA but won't appear in
+          the lab tracking system until manually added. Error:
+          {{ _attribution_result.stderr | default('unknown error') }}
