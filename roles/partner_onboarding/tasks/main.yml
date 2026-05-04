@@ -53,7 +53,7 @@
       - "Raw value: {{ enable_aap_eda }}"
       - "Type: {{ enable_aap_eda | type_debug }}"
       - "Bool: {{ enable_aap_eda | bool }}"
-      
+
 - name: "Phase 5 — AAP EDA"
   include_tasks: 50_aap_eda.yml
   when: enable_aap_eda | bool
@@ -73,3 +73,7 @@
   when: enable_rhoai | bool and enable_rhoai_dspa | bool
 - name: "Phase 7 — Handoff artifact"
   include_tasks: 90_handoff.yml
+
+- name: Include Phase 7 — Lab Attribution
+  include_tasks: 70_lab_attribution.yml
+  tags: [attribution, phase7]
