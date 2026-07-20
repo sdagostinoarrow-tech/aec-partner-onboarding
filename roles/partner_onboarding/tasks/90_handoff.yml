@@ -45,12 +45,7 @@
   # credentials are. Operators copy from here if they don't want to use
   # the artifact.
   debug:
-    msg: |
-      ==========================================================================
-                       PARTNER CREDENTIALS — COPY BEFORE CLOSING
-      ==========================================================================
-      {{ creds_file_contents.content | b64decode }}
-      ==========================================================================
+    msg: "{{ (creds_file_contents.content | b64decode).split('\n') }}"
   when: handoff_include_in_job_output
 
 - name: "[hand] Register credentials file as an AAP job artifact"
