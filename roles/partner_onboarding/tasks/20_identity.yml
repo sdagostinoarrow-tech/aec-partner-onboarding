@@ -89,6 +89,13 @@
   changed_when: true
   no_log: true
 
+- name: "[id] Normalize bcrypt prefix to $2y$ (OpenShift only reads $2a$/$2y$)"
+  replace:
+    path: "/tmp/htpasswd.{{ partner_namespace }}.work"
+    regexp: '\$2b\$'
+    replace: '$2y$'
+  no_log: true
+
 - name: "[id] Read the updated htpasswd file"
   slurp:
     src: "/tmp/htpasswd.{{ partner_namespace }}.work"
