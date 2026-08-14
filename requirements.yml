@@ -3,7 +3,7 @@
 # Install with: ansible-galaxy collection install -r requirements.yml
 #
 # Notes:
-#   - awx.awx is the upstream community collection. We use it instead of
+#   - awx.awx is the upstream community collection to use. We use it instead of
 #     ansible.controller because awx.awx doesn't require an Automation Hub
 #     offline token to install. Both collections expose the same modules
 #     for the operations we use here.
