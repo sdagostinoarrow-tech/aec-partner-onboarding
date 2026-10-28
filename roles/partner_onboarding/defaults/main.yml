@@ -66,6 +66,21 @@ rhoai_storage_class: nas-sc-rwo
 rhoai_workbench_pvc_size: 50Gi
 rhoai_create_partner_bucket: true
 
+# ONTAP S3 (model storage). Tenants get a READ-ONLY connection to the shared
+# models bucket. The key id and secret must come from an AAP credential or
+# survey secret, never from this file. The key id is not secret but is kept
+# out of the repo because this repo is public.
+enable_ontap_connection: true
+ontap_s3_ip: 172.20.168.65
+ontap_s3_port: 80
+ontap_s3_bucket: models-prod
+ontap_s3_ro_access_key: ""
+ontap_s3_ro_secret_key: ""
+
+# The legacy shared-MinIO data connection copies the MinIO ADMIN keys into
+# every partner namespace and needs the quay.io mc image. Off by default.
+enable_minio_connection: false
+
 # Where to find the external MinIO admin credentials secret. The role does
 # not create this — it's part of the cluster baseline. Defaults match where
 # the secret was originally placed in the AEC lab.
