@@ -263,7 +263,7 @@
       "ports":[{"protocol":"TCP","port":{{ ontap_s3_port | int }}}]}]}}
   kubernetes.core.k8s:
     state: present
-    definition: "{{ _ontap_np | from_json }}"
+    definition: "{{ _ontap_np if _ontap_np is mapping else (_ontap_np | from_json) }}"
   when: enable_ontap_connection | bool
 
 - name: "[ns] NetworkPolicy — allow ingress from RHOAI operator namespace"
