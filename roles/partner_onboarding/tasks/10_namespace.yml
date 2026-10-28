@@ -252,24 +252,18 @@
   # KServe storage initializer times out. Only apply it where default-deny
   # exists (it always does here): in a namespace WITHOUT default-deny, a policy
   # that selects pods for Egress would isolate them instead of opening anything.
+  # The definition is built as JSON because older ansible-core (AAP EEs) renders
+  # a templated port as a string, which Kubernetes rejects.
+  vars:
+    _ontap_np: >-
+      {"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+      "metadata":{"name":"allow-ontap-s3","namespace":"{{ partner_namespace }}"},
+      "spec":{"podSelector":{},"policyTypes":["Egress"],
+      "egress":[{"to":[{"ipBlock":{"cidr":"{{ ontap_s3_ip }}/32"}}],
+      "ports":[{"protocol":"TCP","port":{{ ontap_s3_port | int }}}]}]}}
   kubernetes.core.k8s:
     state: present
-    definition:
-      apiVersion: networking.k8s.io/v1
-      kind: NetworkPolicy
-      metadata:
-        name: allow-ontap-s3
-        namespace: "{{ partner_namespace }}"
-      spec:
-        podSelector: {}
-        policyTypes: [Egress]
-        egress:
-          - to:
-              - ipBlock:
-                  cidr: "{{ ontap_s3_ip }}/32"
-            ports:
-              - protocol: TCP
-                port: "{{ ontap_s3_port | int }}"
+    definition: "{{ _ontap_np | from_json }}"
   when: enable_ontap_connection | bool
 
 - name: "[ns] NetworkPolicy — allow ingress from RHOAI operator namespace"
