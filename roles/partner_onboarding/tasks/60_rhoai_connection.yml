@@ -1,142 +1,56 @@
 ---
 # ============================================================================
-# PHASE 6a — RHOAI MINIO DATA CONNECTION
+# PHASE 6a — RHOAI DATA CONNECTIONS
 # ============================================================================
-# Creates a per-partner bucket on the shared external MinIO instance, then
-# creates a Secret in the partner namespace that the RHOAI dashboard
-# recognizes as a "Data Connection." Workbenches can attach this connection
-# to get S3 credentials injected as environment variables, no manual setup.
+# ONTAP S3 (default): read-only connection to the shared models bucket, so
+# KServe InferenceServices and workbenches can load model weights. The key is
+# read-only (GetObject, ListBucket, GetBucketLocation on models-prod only).
 #
-# Two MinIO instances exist on the cluster — don't confuse them:
-#   1. The EXTERNAL one at minio-api-minio.apps... — shared, has buckets
-#      per-partner (mobia, ai-demo, etc.). This is what we use for data
-#      connections that workbenches can read/write.
-#   2. The DSPA-EMBEDDED one created by Phase 6c — internal to each
-#      namespace, used only for pipeline artifacts. Partners don't
-#      interact with it directly.
+# MinIO (legacy, off by default): see 60a_minio_connection.yml. That path
+# copies the shared MinIO admin keys into the partner namespace, so it is
+# disabled unless enable_minio_connection is set to true.
 #
-# CHOICE — partner bucket vs shared bucket:
-#   rhoai_create_partner_bucket: true (default) → each partner gets their
-#     own bucket on the external MinIO. Cleaner separation, partners can't
-#     see each other's data, easier to clean up at offboarding.
-#   rhoai_create_partner_bucket: false → all partners share the ai-demo
-#     bucket. Simpler but no isolation.
-#
-# WAR STORY — `mc` container image entrypoint:
-#   The minio/mc container image uses `mc` as its entrypoint, so any
-#   `oc run` invocation that tries to wrap it in `sh -c` fails because
-#   `mc` doesn't recognize `sh` as a subcommand. Workaround: use the
-#   MC_HOST_<alias> env var to configure the alias inline, then call mc
-#   directly with --command.
+# Per-tenant writable ONTAP buckets are NOT created here yet (stage two).
 # ============================================================================
 
-- name: "[mc] Fetch external MinIO admin credentials from a known location"
-  # We pull the admin credentials from an existing Secret on the cluster
-  # rather than passing them as playbook vars. The secret has to exist
-  # already (it's part of the cluster baseline, not something the role
-  # creates). Default location is the ai-team namespace where the original
-  # MinIO was wired up.
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Secret
-    name: "{{ rhoai_minio_admin_secret_name }}"
-    namespace: "{{ rhoai_minio_admin_secret_ns }}"
-  register: minio_admin_secret
-
-- name: "[mc] Decode MinIO admin credentials"
-  set_fact:
-    minio_access_key: "{{ minio_admin_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
-    minio_secret_key: "{{ minio_admin_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
-    minio_endpoint: "{{ minio_admin_secret.resources[0].data.AWS_S3_ENDPOINT | b64decode }}"
+- name: "[ontap] Require read-only S3 key inputs"
+  assert:
+    that:
+      - ontap_s3_ro_access_key | length == 20
+      - ontap_s3_ro_secret_key | length == 40
+    fail_msg: >
+      ontap_s3_ro_access_key (20 chars) and ontap_s3_ro_secret_key (40 chars)
+      must be supplied from an AAP credential or survey secret.
+  when: enable_ontap_connection | bool
   no_log: true
 
-# ----------------------------------------------------------------------------
-# Bucket creation — only if rhoai_create_partner_bucket is true
-# ----------------------------------------------------------------------------
-
-- name: "[mc] Create the partner bucket on external MinIO"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Pod
-      metadata:
-        name: "mc-{{ partner_namespace }}"
-        namespace: "{{ partner_namespace }}"
-      spec:
-        restartPolicy: Never
-        containers:
-          - name: mc
-            image: quay.io/minio/mc:latest
-            command: ["mc"]
-            args: ["mb", "--ignore-existing", "lab/{{ partner_namespace }}"]
-            env:
-              - name: MC_HOST_lab
-                value: "https://{{ minio_access_key }}:{{ minio_secret_key }}@{{ minio_endpoint | regex_replace('^https?://', '') }}"
-              - name: HOME
-                value: "/tmp"
-  when: rhoai_create_partner_bucket
-  no_log: true
-
-- name: "[mc] Wait for mc pod to complete"
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Pod
-    name: "mc-{{ partner_namespace }}"
-    namespace: "{{ partner_namespace }}"
-  register: mc_pod
-  until:
-    - mc_pod.resources | length > 0
-    - mc_pod.resources[0].status.phase in ['Succeeded', 'Failed']
-  retries: 30
-  delay: 5
-  when: rhoai_create_partner_bucket
-
-- name: "[mc] Check mc pod result"
-  fail:
-    msg: "MinIO bucket creation failed. Check pod logs: oc logs mc-{{ partner_namespace }} -n {{ partner_namespace }}"
-  when:
-    - rhoai_create_partner_bucket
-    - mc_pod.resources[0].status.phase == 'Failed'
-
-- name: "[mc] Clean up mc pod"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: Pod
-    name: "mc-{{ partner_namespace }}"
-    namespace: "{{ partner_namespace }}"
-  when: rhoai_create_partner_bucket
-
-# ----------------------------------------------------------------------------
-# Data Connection Secret in the partner namespace
-# ----------------------------------------------------------------------------
-# The dashboard recognizes secrets with these specific labels and annotations
-# as Data Connections. Workbenches can pick them via the connection picker
-# in the dashboard UI, and the contents get injected as env vars at workbench
-# start time.
-
-- name: "[mc] Create the Data Connection secret in the partner namespace"
+- name: "[ontap] Create the ONTAP S3 read-only Data Connection secret"
   kubernetes.core.k8s:
     state: present
     definition:
       apiVersion: v1
       kind: Secret
       metadata:
-        name: minio-storage
+        name: ontap-models-prod
         namespace: "{{ partner_namespace }}"
         labels:
           opendatahub.io/dashboard: "true"
           opendatahub.io/managed: "true"
         annotations:
           opendatahub.io/connection-type: s3
-          openshift.io/display-name: "MinIO ({{ partner_namespace }} bucket)"
+          openshift.io/display-name: "ONTAP S3 models (read-only)"
+          serving.kserve.io/s3-endpoint: "{{ ontap_s3_ip }}"
+          serving.kserve.io/s3-usehttps: "0"
       type: Opaque
       stringData:
-        AWS_ACCESS_KEY_ID: "{{ minio_access_key }}"
-        AWS_SECRET_ACCESS_KEY: "{{ minio_secret_key }}"
-        AWS_S3_ENDPOINT: "{{ minio_endpoint }}"
-        AWS_S3_BUCKET: >-
-          {{ partner_namespace if rhoai_create_partner_bucket else 'ai-demo' }}
+        AWS_ACCESS_KEY_ID: "{{ ontap_s3_ro_access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ ontap_s3_ro_secret_key }}"
+        AWS_S3_ENDPOINT: "http://{{ ontap_s3_ip }}"
+        AWS_S3_BUCKET: "{{ ontap_s3_bucket }}"
         AWS_DEFAULT_REGION: us-east-1
+  when: enable_ontap_connection | bool
   no_log: true
+
+- name: "[minio] Legacy MinIO data connection"
+  include_tasks: 60a_minio_connection.yml
+  when: enable_minio_connection | bool

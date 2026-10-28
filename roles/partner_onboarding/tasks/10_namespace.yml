@@ -155,6 +155,8 @@
 #   3. allow-dns-and-router: egress to DNS and openshift-ingress
 #   4. allow-kube-apiserver: egress to :443/:6443 (REQUIRED for OAuth proxy
 #      sidecars on RHOAI workbenches — they call TokenReview)
+#   4b. allow-ontap-s3: egress to the ONTAP S3 LIF (model storage), when
+#      enable_ontap_connection is true
 #   5. allow-rhoai-operators: ingress from redhat-ods-applications (the DSPA
 #      operator does object-store health checks against minio-dspa in the
 #      partner namespace and times out without this)
@@ -243,6 +245,32 @@
                 port: 443
               - protocol: TCP
                 port: 6443
+
+- name: "[ns] NetworkPolicy — allow egress to ONTAP S3 (model storage)"
+  # Model weights are served from ONTAP S3 (models-prod bucket). default-deny
+  # above blocks egress to the S3 LIF, so every tenant needs this rule or the
+  # KServe storage initializer times out. Only apply it where default-deny
+  # exists (it always does here): in a namespace WITHOUT default-deny, a policy
+  # that selects pods for Egress would isolate them instead of opening anything.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-ontap-s3
+        namespace: "{{ partner_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes: [Egress]
+        egress:
+          - to:
+              - ipBlock:
+                  cidr: "{{ ontap_s3_ip }}/32"
+            ports:
+              - protocol: TCP
+                port: "{{ ontap_s3_port | int }}"
+  when: enable_ontap_connection | bool
 
 - name: "[ns] NetworkPolicy — allow ingress from RHOAI operator namespace"
   # The data-science-pipelines-operator running in redhat-ods-applications
